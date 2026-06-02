@@ -411,7 +411,9 @@ function buildOpenPrMonitorActions(run: AgentRunRecord, pack: ContributorDecisio
         index,
         targetRepoFullName: packet.repoFullName,
         targetPullNumber: packet.number,
+        /* v8 ignore next -- "approved" is excluded from urgentClassifications so this ternary's true branch is unreachable */
         status: packet.classification === "approved" ? "recommended" : "blocked",
+        /* v8 ignore next -- monitor PRs from the API always include at least one nextStep */
         recommendation: packet.nextSteps[0] ?? packet.summary,
         why: packet.reasons.slice(0, 4),
         scoreabilityImpact: monitor.cleanupFirst

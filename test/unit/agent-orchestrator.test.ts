@@ -361,8 +361,10 @@ describe("agent orchestrator", () => {
     const blockedAction = __agentOrchestratorInternals.actionFromDecisionAction(run, action("open_new_direct_pr", "owner/critical", "pursue", 77), criticalDecision, 1);
     const readyAction = __agentOrchestratorInternals.actionFromDecisionAction(run, action("open_new_direct_pr", "owner/ready", "pursue", 80), readyDecision, 2);
     const emptyNextAction = __agentOrchestratorInternals.actionFromDecisionAction(run, { ...action("open_new_direct_pr", "owner/ready", "pursue", 80), nextActions: [] }, readyDecision, 4);
+    const noPublicNextAction = __agentOrchestratorInternals.actionFromDecisionAction(run, { ...action("open_new_direct_pr", "owner/ready", "pursue", 80), publicNextActions: [] }, { ...readyDecision, publicNextActions: [] }, 5);
     const repoFit = __agentOrchestratorInternals.actionFromRepoDecision(run, { ...readyDecision, nextActions: [] }, 3);
-    const outcomeRepoFit = __agentOrchestratorInternals.actionFromRepoDecision(run, { ...readyDecision, outcome: { repoFullName: "owner/ready" } as any }, 5);
+    const outcomeRepoFit = __agentOrchestratorInternals.actionFromRepoDecision(run, { ...readyDecision, outcome: { repoFullName: "owner/ready" } as any }, 6);
+    const noPublicRepoFit = __agentOrchestratorInternals.actionFromRepoDecision(run, { ...readyDecision, publicNextActions: [] }, 7);
     const defaultEvidenceAction = __agentOrchestratorInternals.actionRecord({
       run,
       actionType: "choose_next_work",
@@ -411,6 +413,8 @@ describe("agent orchestrator", () => {
 
     expect([watchAction.status, blockedAction.status, readyAction.status]).toEqual(["watch", "blocked", "recommended"]);
     expect(emptyNextAction.publicSafeSummary).toMatch(/Use Gittensory preflight/);
+    expect(noPublicNextAction.publicSafeSummary).toMatch(/Use Gittensory preflight/);
+    expect(noPublicRepoFit.publicSafeSummary).toMatch(/Use local branch preflight/);
     expect(repoFit.recommendation).toMatch(/repo fit/);
     expect(noDecisionActions[0]).toMatchObject({ actionType: "explain_repo_fit", status: "recommended" });
     expect(blockerFallback[0]).toMatchObject({ actionType: "explain_score_blockers", status: "blocked" });
@@ -495,6 +499,16 @@ describe("agent orchestrator", () => {
     expect(
       __agentOrchestratorInternals.buildOpenPrMonitorActions(monitorRun, { ...monitorPack, openPrMonitor: { ...monitorPack.openPrMonitor!, pullRequests: [] } }, []),
     ).toEqual([]);
+    const cleanupFalseMonitorPack = decisionPackFixture({
+      generatedAt,
+      openPrMonitor: {
+        ...monitorPack.openPrMonitor!,
+        cleanupFirst: false,
+        pullRequests: [{ repoFullName: "owner/ready", number: 15, title: "Stale hygiene", classification: "stale", summary: "PR is stale.", reasons: [], nextSteps: [] }],
+      },
+    });
+    const cleanupFalseActions = __agentOrchestratorInternals.buildOpenPrMonitorActions(monitorRun, cleanupFalseMonitorPack, [readyDecision]);
+    expect(cleanupFalseActions[0]?.scoreabilityImpact).toMatch(/hygiene/);
     const mergedActions = __agentOrchestratorInternals.buildDecisionActions(monitorRun, monitorPack, [readyDecision]);
     expect(mergedActions.slice(0, 2).map((entry) => entry.actionType)).toEqual(["cleanup_existing_prs", "explain_repo_fit"]);
     expect(mergedActions.some((entry) => entry.actionType === "explain_repo_fit")).toBe(true);
