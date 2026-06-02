@@ -395,6 +395,81 @@ describe("buildRepoOutcomePatterns", () => {
     expect(details.join("\n")).not.toMatch(/duplicate\n@octo-team|@octo-team|[^\\]\[click\]\(https:\/\/example\.test\)/);
   });
 
+  it("includes merged-only PRs absent from pull_requests in the analysis", () => {
+    // Repo has 5 open/closed PRs in pull_requests and 200 merged PRs only in recent_merged_pull_requests.
+    // Without the fix: merge rate = 0/3, triggering false "high closure risk".
+    // With the fix: merge rate = ~0.97 from the full unified set.
+    const pullRequests: PullRequestRecord[] = [
+      closedPr(1),
+      closedPr(2),
+      closedPr(3),
+      pr(4, { state: "open" }),
+      pr(5, { state: "open" }),
+    ];
+    const recentMergedPullRequests: RecentMergedPullRequestRecord[] = Array.from({ length: 200 }, (_, i) => ({
+      repoFullName: REPO,
+      number: 100 + i,
+      title: `Merged PR ${100 + i}`,
+      authorLogin: "dev",
+      mergedAt: "2026-05-01T00:00:00.000Z",
+      labels: ["bug"],
+      linkedIssues: [200 + i],
+      changedFiles: ["src/feature.ts"],
+      payload: {},
+    }));
+    const result = buildRepoOutcomePatterns({ repo: repo(), repoFullName: REPO, pullRequests, recentMergedPullRequests });
+
+    expect(result.totals.analyzed).toBe(205);
+    expect(result.totals.merged).toBe(200);
+    expect(result.totals.closedUnmerged).toBe(3);
+    expect(result.outsideContributorMergeRate).toBeCloseTo(200 / 203, 4);
+    expect(result.riskPatterns.some((p) => p.title === "Outside contributor PRs rarely merge here")).toBe(false);
+    expect(result.successPatterns.some((p) => p.title === "Outside contributors merge well here")).toBe(true);
+  });
+
+  it("does not double-count PRs present in both pull_requests and recent_merged_pull_requests", () => {
+    const pullRequests = [mergedPr(1), mergedPr(2), closedPr(3)];
+    const recentMergedPullRequests: RecentMergedPullRequestRecord[] = [
+      { repoFullName: REPO, number: 1, title: "PR 1", authorLogin: "dev", mergedAt: "2026-05-01T00:00:00.000Z", labels: [], linkedIssues: [], changedFiles: [], payload: {} },
+      { repoFullName: REPO, number: 2, title: "PR 2", authorLogin: "dev", mergedAt: "2026-05-01T00:00:00.000Z", labels: [], linkedIssues: [], changedFiles: [], payload: {} },
+      { repoFullName: REPO, number: 99, title: "Merged only", authorLogin: "dev", mergedAt: "2026-05-01T00:00:00.000Z", labels: [], linkedIssues: [], changedFiles: [], payload: {} },
+    ];
+    const result = buildRepoOutcomePatterns({ repo: repo(), repoFullName: REPO, pullRequests, recentMergedPullRequests });
+    expect(result.totals.analyzed).toBe(4);
+    expect(result.totals.merged).toBe(3);
+    expect(result.totals.closedUnmerged).toBe(1);
+  });
+
+  it("reconciles a closed PR in pull_requests that has a mergedAt in its recent-merged record", () => {
+    // A PR recorded as "closed" in the pull_requests table was actually merged; the merged table has the timestamp.
+    const pullRequests = [
+      closedPr(1),
+      closedPr(2),
+      closedPr(3),
+      mergedPr(4),
+      mergedPr(5),
+      mergedPr(6),
+    ];
+    const recentMergedPullRequests: RecentMergedPullRequestRecord[] = [
+      { repoFullName: REPO, number: 1, title: "PR 1", authorLogin: "dev", mergedAt: "2026-05-01T00:00:00.000Z", labels: [], linkedIssues: [], changedFiles: ["src/a.ts"], payload: {} },
+      { repoFullName: REPO, number: 2, title: "PR 2", authorLogin: "dev", mergedAt: "2026-05-01T00:00:00.000Z", labels: [], linkedIssues: [], changedFiles: ["src/b.ts"], payload: {} },
+    ];
+    const result = buildRepoOutcomePatterns({ repo: repo(), repoFullName: REPO, pullRequests, recentMergedPullRequests });
+    expect(result.totals.merged).toBe(5);
+    expect(result.totals.closedUnmerged).toBe(1);
+    expect(result.outsideContributorMergeRate).toBeCloseTo(5 / 6, 4);
+  });
+
+  it("does not reconcile a closed PR whose recent-merged record carries no mergedAt timestamp", () => {
+    const pullRequests = [closedPr(1), mergedPr(2), mergedPr(3), mergedPr(4)];
+    const recentMergedPullRequests: RecentMergedPullRequestRecord[] = [
+      { repoFullName: REPO, number: 1, title: "PR 1", authorLogin: "dev", mergedAt: null, labels: [], linkedIssues: [], changedFiles: [], payload: {} },
+    ];
+    const result = buildRepoOutcomePatterns({ repo: repo(), repoFullName: REPO, pullRequests, recentMergedPullRequests });
+    expect(result.totals.closedUnmerged).toBe(1);
+    expect(result.totals.merged).toBe(3);
+  });
+
   it("never emits forbidden public-surface language", () => {
     const fixtures = [
       buildRepoOutcomePatterns(primaryFixture()),

@@ -1798,33 +1798,56 @@ export function buildRepoOutcomePatterns(args: {
   const lane = buildLaneAdvice(args.repo, args.repoFullName).lane;
   const primaryLanguage = args.syncState?.primaryLanguage ?? null;
 
-  const analyzed: RepoOutcomePullRequest[] = args.pullRequests
-    .filter((pr) => pr.repoFullName.toLowerCase() === repoKey)
-    .map((pr) => {
-      const mergedDetail = mergedDetailByNumber.get(pr.number);
-      const merged = Boolean(pr.mergedAt) || pr.state === "merged";
-      const closedUnmerged = !merged && pr.state === "closed";
-      const open = !merged && !closedUnmerged;
-      const stale = open && daysSince(pr.updatedAt ?? pr.createdAt) >= REPO_OUTCOME_STALE_OPEN_DAYS;
-      const bucket: RepoOutcomeBucket = merged ? "merged" : closedUnmerged ? "closed_unmerged" : stale ? "open_stale" : "open_active";
-      const fileRecords = filesByNumber.get(pr.number) ?? [];
-      const filePaths = [...new Set([...fileRecords.map((file) => file.path), ...(mergedDetail?.changedFiles ?? [])])].sort();
-      const reviewRecords = reviewsByNumber.get(pr.number) ?? [];
-      return {
-        number: pr.number,
-        bucket,
-        decided: merged || closedUnmerged,
-        merged,
-        maintainerLane: isMaintainerAssociation(pr.authorAssociation),
-        linked: pr.linkedIssues.length > 0 || (mergedDetail?.linkedIssues.length ?? 0) > 0,
-        labels: [...new Set([...pr.labels, ...(mergedDetail?.labels ?? [])])].sort(),
-        filePaths,
-        changedLineCount: fileRecords.reduce((sum, file) => sum + file.additions + file.deletions, 0),
-        authorRole: pr.authorAssociation === "CONTRIBUTOR" ? "returning_contributor" : "first_time_or_external",
-        hasReview: reviewRecords.length > 0,
-        changesRequested: reviewRecords.some((review) => review.state === "CHANGES_REQUESTED"),
-      };
-    });
+  const knownPrNumbers = new Set(
+    args.pullRequests.filter((pr) => pr.repoFullName.toLowerCase() === repoKey).map((pr) => pr.number),
+  );
+  const analyzed: RepoOutcomePullRequest[] = [
+    ...args.pullRequests
+      .filter((pr) => pr.repoFullName.toLowerCase() === repoKey)
+      .map((pr): RepoOutcomePullRequest => {
+        const mergedDetail = mergedDetailByNumber.get(pr.number);
+        // Reconcile: a "closed" PR that has a merged record with a timestamp was actually merged and mislabelled.
+        const merged = Boolean(pr.mergedAt) || pr.state === "merged" || Boolean(mergedDetail?.mergedAt);
+        const closedUnmerged = !merged && pr.state === "closed";
+        const open = !merged && !closedUnmerged;
+        const stale = open && daysSince(pr.updatedAt ?? pr.createdAt) >= REPO_OUTCOME_STALE_OPEN_DAYS;
+        const bucket: RepoOutcomeBucket = merged ? "merged" : closedUnmerged ? "closed_unmerged" : stale ? "open_stale" : "open_active";
+        const fileRecords = filesByNumber.get(pr.number) ?? [];
+        const filePaths = [...new Set([...fileRecords.map((file) => file.path), ...(mergedDetail?.changedFiles ?? [])])].sort();
+        const reviewRecords = reviewsByNumber.get(pr.number) ?? [];
+        return {
+          number: pr.number,
+          bucket,
+          decided: merged || closedUnmerged,
+          merged,
+          maintainerLane: isMaintainerAssociation(pr.authorAssociation),
+          linked: pr.linkedIssues.length > 0 || (mergedDetail?.linkedIssues.length ?? 0) > 0,
+          labels: [...new Set([...pr.labels, ...(mergedDetail?.labels ?? [])])].sort(),
+          filePaths,
+          changedLineCount: fileRecords.reduce((sum, file) => sum + file.additions + file.deletions, 0),
+          authorRole: pr.authorAssociation === "CONTRIBUTOR" ? "returning_contributor" : "first_time_or_external",
+          hasReview: reviewRecords.length > 0,
+          changesRequested: reviewRecords.some((review) => review.state === "CHANGES_REQUESTED"),
+        };
+      }),
+    // Include merged PRs that exist only in recent_merged_pull_requests (absent from pull_requests).
+    ...(args.recentMergedPullRequests ?? [])
+      .filter((record) => record.repoFullName.toLowerCase() === repoKey && !knownPrNumbers.has(record.number))
+      .map((record): RepoOutcomePullRequest => ({
+        number: record.number,
+        bucket: "merged",
+        decided: true,
+        merged: true,
+        maintainerLane: false,
+        linked: record.linkedIssues.length > 0,
+        labels: [...record.labels].sort(),
+        filePaths: [...record.changedFiles].sort(),
+        changedLineCount: 0,
+        authorRole: "first_time_or_external",
+        hasReview: false,
+        changesRequested: false,
+      })),
+  ];
 
   const decided = analyzed.filter((pr) => pr.decided);
   const maintainer = analyzed.filter((pr) => pr.maintainerLane);
@@ -1957,18 +1980,22 @@ export function buildRepoOutcomePatterns(args: {
   for (const state of args.detailSyncStates ?? []) {
     if (state.repoFullName.toLowerCase() === repoKey) detailByNumber.set(state.pullNumber, state);
   }
-  const withFileDetail = analyzed.filter((pr) => Boolean(detailByNumber.get(pr.number)?.filesSyncedAt)).length;
-  const withReviewDetail = analyzed.filter((pr) => Boolean(detailByNumber.get(pr.number)?.reviewsSyncedAt)).length;
-  const withCheckDetail = analyzed.filter((pr) => Boolean(detailByNumber.get(pr.number)?.checksSyncedAt)).length;
+  // evidenceCompleteness tracks detail-sync progress for pull_requests records only — merged-only records from
+  // recent_merged_pull_requests are never eligible for detail sync and must not dilute the denominator.
+  const syncEligible = analyzed.filter((pr) => knownPrNumbers.has(pr.number));
+  const withFileDetail = syncEligible.filter((pr) => Boolean(detailByNumber.get(pr.number)?.filesSyncedAt)).length;
+  const withReviewDetail = syncEligible.filter((pr) => Boolean(detailByNumber.get(pr.number)?.reviewsSyncedAt)).length;
+  const withCheckDetail = syncEligible.filter((pr) => Boolean(detailByNumber.get(pr.number)?.checksSyncedAt)).length;
   const fullyDecidedWithDetail = decided.filter((pr) => {
+    if (!knownPrNumbers.has(pr.number)) return false;
     const state = detailByNumber.get(pr.number);
     return Boolean(state?.filesSyncedAt && state?.reviewsSyncedAt && state?.checksSyncedAt);
   }).length;
-  const filesCompletenessRatio = rate(withFileDetail, analyzed.length);
-  const reviewsCompletenessRatio = rate(withReviewDetail, analyzed.length);
-  const checksCompletenessRatio = rate(withCheckDetail, analyzed.length);
+  const filesCompletenessRatio = rate(withFileDetail, syncEligible.length);
+  const reviewsCompletenessRatio = rate(withReviewDetail, syncEligible.length);
+  const checksCompletenessRatio = rate(withCheckDetail, syncEligible.length);
   const completenessStatus: RepoOutcomeEvidenceCompleteness["status"] =
-    analyzed.length === 0 || (withFileDetail === 0 && withReviewDetail === 0 && withCheckDetail === 0)
+    syncEligible.length === 0 || (withFileDetail === 0 && withReviewDetail === 0 && withCheckDetail === 0)
       ? "missing"
       : filesCompletenessRatio >= 0.85 && reviewsCompletenessRatio >= 0.85 && checksCompletenessRatio >= 0.85
         ? "complete"
