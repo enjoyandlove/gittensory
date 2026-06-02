@@ -2135,167 +2135,95 @@
           "missing"
         ]
       },
-      "ContributorOpenPrNextStepPacket": {
+      "AgentRecommendationOutcomeState": {
+        "type": "string",
+        "enum": [
+          "accepted",
+          "ignored",
+          "stale",
+          "merged",
+          "closed",
+          "improved"
+        ]
+      },
+      "AgentRecommendationOutcomeStateBucket": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/AgentRecommendationOutcomeState"
+          },
+          "count": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "state",
+          "count"
+        ]
+      },
+      "AgentRecommendationOutcomeRepoSummary": {
         "type": "object",
         "properties": {
           "repoFullName": {
             "type": "string"
           },
-          "number": {
+          "total": {
             "type": "number"
           },
-          "title": {
-            "type": "string"
+          "accepted": {
+            "type": "number"
           },
-          "classification": {
+          "ignored": {
+            "type": "number"
+          },
+          "stale": {
+            "type": "number"
+          },
+          "merged": {
+            "type": "number"
+          },
+          "closed": {
+            "type": "number"
+          },
+          "improved": {
+            "type": "number"
+          },
+          "positive": {
+            "type": "number"
+          },
+          "negative": {
+            "type": "number"
+          },
+          "maintainerLaneTotal": {
+            "type": "number"
+          },
+          "latestOutcomeAt": {
+            "type": "string",
+            "nullable": true
+          },
+          "signal": {
             "type": "string",
             "enum": [
-              "approved",
-              "blocked",
-              "stale",
-              "needs_author",
-              "failing_checks",
-              "missing_tests",
-              "duplicate_prone",
-              "reviewable",
-              "should_close_or_withdraw",
-              "maintainer_lane",
-              "draft"
+              "positive",
+              "negative",
+              "mixed",
+              "neutral"
             ]
-          },
-          "summary": {
-            "type": "string"
-          },
-          "reasons": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "nextSteps": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
           }
         },
         "required": [
           "repoFullName",
-          "number",
-          "title",
-          "classification",
-          "summary",
-          "reasons",
-          "nextSteps"
-        ]
-      },
-      "ContributorOpenPrMonitor": {
-        "type": "object",
-        "properties": {
-          "login": {
-            "type": "string"
-          },
-          "generatedAt": {
-            "type": "string"
-          },
-          "openPrCount": {
-            "type": "number"
-          },
-          "registeredRepoCount": {
-            "type": "number"
-          },
-          "cleanupFirst": {
-            "type": "boolean"
-          },
-          "summary": {
-            "type": "string"
-          },
-          "guidance": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "maintainerLaneRepos": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": {
-                "nullable": true
-              }
-            }
-          },
-          "scoreBlockers": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": {
-                "nullable": true
-              }
-            }
-          },
-          "recommendationOutcomeFeedback": {
-            "$ref": "#/components/schemas/AgentRecommendationOutcomeSummary"
-          },
-          "evidenceGraph": {
-            "type": "object",
-            "additionalProperties": {
-              "nullable": true
-            }
-          },
-          "dataQuality": {
-            "type": "object",
-            "additionalProperties": {
-              "nullable": true
-            }
-          },
-          "summary": {
-            "type": "string"
-          },
-          "nextActions": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "openPrMonitor": {
-            "$ref": "#/components/schemas/ContributorOpenPrMonitor"
-          }
-        },
-        "required": [
-          "status",
-          "source",
-          "login",
-          "generatedAt",
+          "total",
+          "accepted",
+          "ignored",
           "stale",
-          "freshness",
-          "rebuildEnqueued",
-          "scoringModelSnapshotId",
-          "profile",
-          "outcomeHistory",
-          "roleContexts",
-          "opportunities",
-          "repoDecisions",
-          "topActions",
-          "actionPortfolio",
-          "cleanupFirst",
-          "pursueRepos",
-          "avoidRepos",
-          "maintainerLaneRepos",
-          "scoreBlockers",
-          "recommendationOutcomeFeedback",
-          "dataQuality",
-          "summary",
-          "nextActions"
-        ]
-      },
-      "DecisionPackFreshness": {
-        "type": "string",
-        "enum": [
-          "fresh",
-          "stale",
-          "rebuilding",
-          "missing"
+          "merged",
+          "closed",
+          "improved",
+          "positive",
+          "negative",
+          "maintainerLaneTotal",
+          "signal"
         ]
       },
       "AgentRecommendationOutcomeSummary": {
@@ -2402,95 +2330,58 @@
           "privateSummary"
         ]
       },
-      "AgentRecommendationOutcomeStateBucket": {
-        "type": "object",
-        "properties": {
-          "state": {
-            "$ref": "#/components/schemas/AgentRecommendationOutcomeState"
-          },
-          "count": {
-            "type": "number"
-          }
-        },
-        "required": [
-          "state",
-          "count"
-        ]
-      },
-      "AgentRecommendationOutcomeState": {
-        "type": "string",
-        "enum": [
-          "accepted",
-          "ignored",
-          "stale",
-          "merged",
-          "closed",
-          "improved"
-        ]
-      },
-      "AgentRecommendationOutcomeRepoSummary": {
+      "ContributorOpenPrNextStepPacket": {
         "type": "object",
         "properties": {
           "repoFullName": {
             "type": "string"
           },
-          "total": {
+          "number": {
             "type": "number"
           },
-          "accepted": {
-            "type": "number"
+          "title": {
+            "type": "string"
           },
-          "ignored": {
-            "type": "number"
-          },
-          "stale": {
-            "type": "number"
-          },
-          "merged": {
-            "type": "number"
-          },
-          "closed": {
-            "type": "number"
-          },
-          "improved": {
-            "type": "number"
-          },
-          "positive": {
-            "type": "number"
-          },
-          "negative": {
-            "type": "number"
-          },
-          "maintainerLaneTotal": {
-            "type": "number"
-          },
-          "latestOutcomeAt": {
-            "type": "string",
-            "nullable": true
-          },
-          "signal": {
+          "classification": {
             "type": "string",
             "enum": [
-              "positive",
-              "negative",
-              "mixed",
-              "neutral"
+              "approved",
+              "blocked",
+              "stale",
+              "needs_author",
+              "failing_checks",
+              "missing_tests",
+              "duplicate_prone",
+              "reviewable",
+              "should_close_or_withdraw",
+              "maintainer_lane",
+              "draft"
             ]
+          },
+          "summary": {
+            "type": "string"
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "nextSteps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
           "repoFullName",
-          "total",
-          "accepted",
-          "ignored",
-          "stale",
-          "merged",
-          "closed",
-          "improved",
-          "positive",
-          "negative",
-          "maintainerLaneTotal",
-          "signal"
+          "number",
+          "title",
+          "classification",
+          "summary",
+          "reasons",
+          "nextSteps"
         ]
       },
       "ContributorOpenPrMonitor": {
@@ -2749,6 +2640,9 @@
               }
             }
           },
+          "recommendationOutcomeFeedback": {
+            "$ref": "#/components/schemas/AgentRecommendationOutcomeSummary"
+          },
           "evidenceGraph": {
             "type": "object",
             "additionalProperties": {
@@ -2795,6 +2689,7 @@
           "avoidRepos",
           "maintainerLaneRepos",
           "scoreBlockers",
+          "recommendationOutcomeFeedback",
           "dataQuality",
           "summary",
           "nextActions"
@@ -7557,6 +7452,154 @@
           "privateTrustEnabled"
         ]
       },
+      "InstallationHealth": {
+        "type": "object",
+        "properties": {
+          "installationId": {
+            "type": "number"
+          },
+          "accountLogin": {
+            "type": "string"
+          },
+          "repositorySelection": {
+            "type": "string",
+            "nullable": true
+          },
+          "installedReposCount": {
+            "type": "number"
+          },
+          "registeredInstalledCount": {
+            "type": "number"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "needs_attention",
+              "broken"
+            ]
+          },
+          "missingPermissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "missingEvents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "permissions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "checkedAt": {
+            "type": "string"
+          },
+          "errorSummary": {
+            "type": "string",
+            "nullable": true
+          },
+          "requiredPermissions": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "requiredEvents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "optionalVisibleEvents": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "permissionRemediation": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "permission": {
+                  "type": "string"
+                },
+                "requiredAccess": {
+                  "type": "string"
+                },
+                "currentAccess": {
+                  "type": "string"
+                },
+                "ok": {
+                  "type": "boolean"
+                },
+                "action": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "permission",
+                "requiredAccess",
+                "currentAccess",
+                "ok",
+                "action"
+              ]
+            }
+          },
+          "eventRemediation": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "event": {
+                  "type": "string"
+                },
+                "ok": {
+                  "type": "boolean"
+                },
+                "action": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "event",
+                "ok",
+                "action"
+              ]
+            }
+          },
+          "repairSteps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "installationId",
+          "accountLogin",
+          "installedReposCount",
+          "registeredInstalledCount",
+          "status",
+          "missingPermissions",
+          "missingEvents",
+          "permissions",
+          "events",
+          "checkedAt"
+        ]
+      },
       "InstallationRepair": {
         "type": "object",
         "properties": {
@@ -7783,154 +7826,6 @@
           "eventDiagnostics",
           "repairSteps",
           "refresh"
-        ]
-      },
-      "InstallationHealth": {
-        "type": "object",
-        "properties": {
-          "installationId": {
-            "type": "number"
-          },
-          "accountLogin": {
-            "type": "string"
-          },
-          "repositorySelection": {
-            "type": "string",
-            "nullable": true
-          },
-          "installedReposCount": {
-            "type": "number"
-          },
-          "registeredInstalledCount": {
-            "type": "number"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "healthy",
-              "needs_attention",
-              "broken"
-            ]
-          },
-          "missingPermissions": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "missingEvents": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "permissions": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
-          },
-          "events": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "checkedAt": {
-            "type": "string"
-          },
-          "errorSummary": {
-            "type": "string",
-            "nullable": true
-          },
-          "requiredPermissions": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
-          },
-          "requiredEvents": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "optionalVisibleEvents": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "permissionRemediation": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "permission": {
-                  "type": "string"
-                },
-                "requiredAccess": {
-                  "type": "string"
-                },
-                "currentAccess": {
-                  "type": "string"
-                },
-                "ok": {
-                  "type": "boolean"
-                },
-                "action": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "permission",
-                "requiredAccess",
-                "currentAccess",
-                "ok",
-                "action"
-              ]
-            }
-          },
-          "eventRemediation": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "event": {
-                  "type": "string"
-                },
-                "ok": {
-                  "type": "boolean"
-                },
-                "action": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "event",
-                "ok",
-                "action"
-              ]
-            }
-          },
-          "repairSteps": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "required": [
-          "installationId",
-          "accountLogin",
-          "installedReposCount",
-          "registeredInstalledCount",
-          "status",
-          "missingPermissions",
-          "missingEvents",
-          "permissions",
-          "events",
-          "checkedAt"
         ]
       },
       "RepoSettingsPreview": {
@@ -8574,6 +8469,92 @@
           "payload"
         ]
       },
+      "AgentActionExplanationCard": {
+        "type": "object",
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "whyNow": {
+            "type": "string"
+          },
+          "scoreabilityBlocker": {
+            "type": "string"
+          },
+          "risk": {
+            "type": "string"
+          },
+          "maintainerFriction": {
+            "type": "string"
+          },
+          "expectedImpact": {
+            "type": "string"
+          },
+          "blockerGroups": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "enum": [
+                    "branch",
+                    "account",
+                    "queue",
+                    "scoreability",
+                    "risk",
+                    "maintainer",
+                    "unknown"
+                  ]
+                },
+                "items": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "category",
+                "items"
+              ]
+            }
+          },
+          "rerunWhen": {
+            "type": "string"
+          },
+          "publicSafe": {
+            "type": "object",
+            "properties": {
+              "summary": {
+                "type": "string"
+              },
+              "whyNow": {
+                "type": "string"
+              },
+              "rerunWhen": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "summary",
+              "whyNow",
+              "rerunWhen"
+            ]
+          }
+        },
+        "required": [
+          "summary",
+          "whyNow",
+          "scoreabilityBlocker",
+          "risk",
+          "maintainerFriction",
+          "expectedImpact",
+          "blockerGroups",
+          "rerunWhen",
+          "publicSafe"
+        ]
+      },
       "AgentAction": {
         "type": "object",
         "properties": {
@@ -8690,92 +8671,6 @@
           "approvalRequired",
           "safetyClass",
           "payload"
-        ]
-      },
-      "AgentActionExplanationCard": {
-        "type": "object",
-        "properties": {
-          "summary": {
-            "type": "string"
-          },
-          "whyNow": {
-            "type": "string"
-          },
-          "scoreabilityBlocker": {
-            "type": "string"
-          },
-          "risk": {
-            "type": "string"
-          },
-          "maintainerFriction": {
-            "type": "string"
-          },
-          "expectedImpact": {
-            "type": "string"
-          },
-          "blockerGroups": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "category": {
-                  "type": "string",
-                  "enum": [
-                    "branch",
-                    "account",
-                    "queue",
-                    "scoreability",
-                    "risk",
-                    "maintainer",
-                    "unknown"
-                  ]
-                },
-                "items": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              },
-              "required": [
-                "category",
-                "items"
-              ]
-            }
-          },
-          "rerunWhen": {
-            "type": "string"
-          },
-          "publicSafe": {
-            "type": "object",
-            "properties": {
-              "summary": {
-                "type": "string"
-              },
-              "whyNow": {
-                "type": "string"
-              },
-              "rerunWhen": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "summary",
-              "whyNow",
-              "rerunWhen"
-            ]
-          }
-        },
-        "required": [
-          "summary",
-          "whyNow",
-          "scoreabilityBlocker",
-          "risk",
-          "maintainerFriction",
-          "expectedImpact",
-          "blockerGroups",
-          "rerunWhen",
-          "publicSafe"
         ]
       },
       "AgentContextSnapshot": {
@@ -9186,302 +9081,6 @@
           "cappedRepos",
           "staleRepos",
           "rateLimitedRepos"
-        ]
-      },
-      "InstallationHealth": {
-        "type": "object",
-        "properties": {
-          "installationId": {
-            "type": "number"
-          },
-          "accountLogin": {
-            "type": "string"
-          },
-          "repositorySelection": {
-            "type": "string",
-            "nullable": true
-          },
-          "installedReposCount": {
-            "type": "number"
-          },
-          "registeredInstalledCount": {
-            "type": "number"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "healthy",
-              "needs_attention",
-              "broken"
-            ]
-          },
-          "missingPermissions": {
-      "SyncStatus": {
-        "type": "object",
-        "properties": {
-          "generatedAt": {
-            "type": "string"
-          },
-          "signalFidelity": {
-            "$ref": "#/components/schemas/SignalFidelity"
-          },
-          "freshnessSlo": {
-            "type": "object",
-            "properties": {
-              "status": {
-                "type": "string",
-                "enum": [
-                  "fresh",
-                  "degraded",
-                  "blocked"
-                ]
-              },
-              "generatedAt": {
-                "type": "string"
-              },
-              "staleCount": {
-                "type": "number"
-              },
-              "degradedCount": {
-                "type": "number"
-              },
-              "blockedCount": {
-                "type": "number"
-              },
-              "missingCount": {
-                "type": "number"
-              },
-              "launchBlockingCount": {
-                "type": "number"
-              },
-              "repairRecommended": {
-                "type": "boolean"
-              },
-              "items": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "area": {
-                      "type": "string"
-                    },
-                    "targetKey": {
-                      "type": "string"
-                    },
-                    "status": {
-                      "type": "string"
-                    },
-                    "launchBlocking": {
-                      "type": "boolean"
-                    },
-                    "ageSeconds": {
-                      "type": "number"
-                    },
-                    "sloSeconds": {
-                      "type": "number"
-                    },
-                    "breachSeconds": {
-                      "type": "number"
-                    },
-                    "observedAt": {
-                      "type": "string",
-                      "nullable": true
-                    },
-                    "summary": {
-                      "type": "string"
-                    }
-                  },
-                  "required": [
-                    "area",
-                    "targetKey",
-                    "status",
-                    "launchBlocking",
-                    "sloSeconds",
-                    "summary"
-                  ]
-                }
-              },
-              "warnings": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              }
-            },
-            "required": [
-              "status",
-              "generatedAt",
-              "staleCount",
-              "degradedCount",
-              "blockedCount",
-              "missingCount",
-              "launchBlockingCount",
-              "repairRecommended",
-              "items",
-              "warnings"
-            ]
-          },
-          "coreSignalFidelity": {
-            "$ref": "#/components/schemas/CoreSignalFidelity"
-          },
-          "upstreamDrift": {
-            "$ref": "#/components/schemas/UpstreamStatus"
-          },
-          "historyCoverage": {
-            "type": "string",
-            "enum": [
-              "sampled",
-              "counts_only",
-              "full"
-            ]
-          },
-          "refreshingRepos": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "waitingForRateLimitRepos": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "permissions": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
-          },
-          "events": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "checkedAt": {
-            "type": "string"
-          },
-          "errorSummary": {
-            "type": "string",
-            "nullable": true
-          },
-          "requiredPermissions": {
-            "type": "object",
-            "additionalProperties": {
-              "type": "string"
-            }
-          },
-          "requiredEvents": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "optionalVisibleEvents": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "permissionRemediation": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "permission": {
-                  "type": "string"
-                },
-                "requiredAccess": {
-                  "type": "string"
-                },
-                "currentAccess": {
-                  "type": "string"
-                },
-                "ok": {
-                  "type": "boolean"
-                },
-                "action": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "permission",
-                "requiredAccess",
-                "currentAccess",
-                "ok",
-                "action"
-              ]
-            }
-          },
-          "eventRemediation": {
-          "repositories": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RepoSyncState"
-            }
-          },
-          "segments": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RepoSyncSegment"
-            }
-          },
-          "githubTotals": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RepoGithubTotalsSnapshot"
-            }
-          },
-          "pullRequestDetailSync": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "additionalProperties": {
-                "nullable": true
-              }
-            }
-          },
-          "installations": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "event": {
-                  "type": "string"
-                },
-                "ok": {
-                  "type": "boolean"
-                },
-                "action": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "event",
-                "ok",
-                "action"
-              ]
-            }
-          },
-          "repairSteps": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "required": [
-          "installationId",
-          "accountLogin",
-          "installedReposCount",
-          "registeredInstalledCount",
-          "status",
-          "missingPermissions",
-          "missingEvents",
-          "permissions",
-          "events",
-          "checkedAt"
         ]
       },
       "CoreSignalFidelity": {
