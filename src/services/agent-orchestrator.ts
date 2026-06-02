@@ -263,9 +263,6 @@ async function executeDecisionPackRun(env: Env, run: AgentRunRecord, kind: strin
       ? buildBlockerActions(run, pack, decisions, { allowFallback: allowCrossRepoFallback, snapshotId: contextSnapshot.id })
       : buildDecisionActions(run, pack, scopedDecisionActions, contextSnapshot.id);
   const contexts = [contextSnapshot];
-      ? buildBlockerActions(run, pack, decisions, { allowFallback: allowCrossRepoFallback })
-      : buildDecisionActions(run, pack, scopedDecisionActions);
-  const contexts = [contextSnapshotFromPack(run.id, pack, decisions)];
   const selectedActionPortfolio = contexts[0]?.payload.actionPortfolio ?? null;
   await replaceAgentActions(env, run.id, actions);
   await persistAgentContextSnapshot(env, contexts[0]!);
