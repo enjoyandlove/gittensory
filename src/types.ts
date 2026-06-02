@@ -1094,6 +1094,7 @@ export type ProductUsageDailyRollupRecord = {
   activationByRole: ProductUsageRoleActivationFunnel[];
   activationBySurface: ProductUsageSurfaceActivationFunnel[];
   retention: ProductUsageRetentionRollup[];
+  qualityByRoleOutcome: RecommendationQualityByRoleOutcome[];
   generatedAt: string;
   updatedAt: string;
 };
@@ -1115,6 +1116,30 @@ export type ProductUsageRollupStatus = {
   staleDays: string[];
   incompleteDays: string[];
   warnings: string[];
+};
+
+// Recommendation outcome categories — used to classify how a recommendation was acted on.
+// "accepted" and "rejected" are explicit feedback; the rest are inferred from lifecycle events.
+export type RecommendationOutcomeCategory =
+  | "accepted"
+  | "rejected"
+  | "ignored"
+  | "stale"
+  | "merged"
+  | "closed"
+  | "improved";
+
+export type RecommendationOutcomeLane = "maintainer" | "contributor";
+
+export type RecommendationQualityDimensionCount = {
+  outcomeCategory: RecommendationOutcomeCategory;
+  count: number;
+};
+
+export type RecommendationQualityByRoleOutcome = {
+  role: ProductUsageRole;
+  lane: RecommendationOutcomeLane;
+  byOutcomeCategory: RecommendationQualityDimensionCount[];
 };
 
 export type WeeklyValueReportVariant = "public" | "operator";

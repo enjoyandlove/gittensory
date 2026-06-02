@@ -846,6 +846,7 @@ export const productUsageDailyRollups = sqliteTable(
     activationByRoleJson: text("activation_by_role_json").notNull().default("[]"),
     activationBySurfaceJson: text("activation_by_surface_json").notNull().default("[]"),
     retentionJson: text("retention_json").notNull().default("[]"),
+    qualityByRoleOutcomeJson: text("quality_by_role_outcome_json").notNull().default("[]"),
     generatedAt: text("generated_at").notNull().default("CURRENT_TIMESTAMP"),
     updatedAt: text("updated_at").notNull().default("CURRENT_TIMESTAMP"),
   },

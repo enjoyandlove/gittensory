@@ -102,6 +102,10 @@ import type {
   ProductUsageSurface,
   ProductUsageSurfaceActivationFunnel,
   ProductUsageSurfaceRetention,
+  RecommendationOutcomeCategory,
+  RecommendationOutcomeLane,
+  RecommendationQualityByRoleOutcome,
+  RecommendationQualityDimensionCount,
   PullRequestFileRecord,
   PullRequestDetailSyncStateRecord,
   PullRequestRecord,
@@ -3102,6 +3106,7 @@ function toProductUsageDailyRollupRecord(row: typeof productUsageDailyRollups.$i
     activationByRole: parseJson<ProductUsageRoleActivationFunnel[]>(row.activationByRoleJson, []),
     activationBySurface: parseJson<ProductUsageSurfaceActivationFunnel[]>(row.activationBySurfaceJson, []),
     retention: parseJson<ProductUsageRetentionRollup[]>(row.retentionJson, []),
+    qualityByRoleOutcome: parseJson<RecommendationQualityByRoleOutcome[]>(row.qualityByRoleOutcomeJson, []),
     generatedAt: row.generatedAt,
     updatedAt: row.updatedAt,
   };
@@ -3239,6 +3244,7 @@ async function upsertProductUsageDailyRollup(env: Env, day: string, generatedAt:
       activationByRoleJson: jsonString(record.activationByRole),
       activationBySurfaceJson: jsonString(record.activationBySurface),
       retentionJson: jsonString(record.retention),
+      qualityByRoleOutcomeJson: jsonString(record.qualityByRoleOutcome),
       generatedAt: record.generatedAt,
       updatedAt: record.updatedAt,
     })
@@ -3266,6 +3272,7 @@ async function upsertProductUsageDailyRollup(env: Env, day: string, generatedAt:
         activationByRoleJson: jsonString(record.activationByRole),
         activationBySurfaceJson: jsonString(record.activationBySurface),
         retentionJson: jsonString(record.retention),
+        qualityByRoleOutcomeJson: jsonString(record.qualityByRoleOutcome),
         generatedAt: record.generatedAt,
         updatedAt: record.updatedAt,
       },
@@ -3317,6 +3324,7 @@ function buildProductUsageDailyRollupRecord(args: {
     activationByRole: roleBuckets.map(({ role, events }) => ({ role, ...buildProductUsageActivationFunnel(events) })),
     activationBySurface: surfaceBuckets.map(({ surface, events }) => ({ surface, ...buildProductUsageActivationFunnel(events) })),
     retention: buildProductUsageRetentionRollups(args.day, args.events, args.retentionEvents, args.retentionCapped),
+    qualityByRoleOutcome: buildRecommendationQualityByRoleOutcome(args.events),
     generatedAt: args.generatedAt,
     updatedAt: args.generatedAt,
   };
@@ -3522,6 +3530,55 @@ function productUsageRoleSortValue(role: ProductUsageRole): number {
   return PRODUCT_USAGE_ROLE_ORDER.indexOf(role);
 }
 
+// Maps a product usage event to a recommendation outcome category by reading the
+// "outcomeCategory" metadata field recorded at recommendation-reply time.
+// Only events that carry a recognized outcomeCategory are counted; all others are skipped
+// so that non-recommendation events (auth, MCP, etc.) never appear in quality rollups.
+function recommendationOutcomeCategoryForEvent(event: ProductUsageEventRecord): RecommendationOutcomeCategory | null {
+  const raw = productUsageMetadataString(event, "outcomeCategory");
+  return normalizeRecommendationOutcomeCategory(raw);
+}
+
+function normalizeRecommendationOutcomeCategory(value: unknown): RecommendationOutcomeCategory | null {
+  return RECOMMENDATION_OUTCOME_CATEGORIES.has(value as RecommendationOutcomeCategory)
+    ? (value as RecommendationOutcomeCategory)
+    : null;
+}
+
+// A "maintainer" lane event is one explicitly associated with a maintainer actor kind.
+// All other recommendation events fall into the "contributor" lane.
+function recommendationOutcomeLaneForEvent(event: ProductUsageEventRecord): RecommendationOutcomeLane {
+  return productUsageMetadataString(event, "actorKind") === "maintainer" ? "maintainer" : "contributor";
+}
+
+function buildRecommendationQualityByRoleOutcome(events: ProductUsageEventRecord[]): RecommendationQualityByRoleOutcome[] {
+  type BucketKey = string; // `${role}:${lane}`
+  const buckets = new Map<BucketKey, { role: ProductUsageRole; lane: RecommendationOutcomeLane; counts: Map<RecommendationOutcomeCategory, number> }>();
+  const actorRoles = productUsageRolesByActor(events);
+
+  for (const event of events) {
+    const outcomeCategory = recommendationOutcomeCategoryForEvent(event);
+    if (!outcomeCategory) continue;
+    const lane = recommendationOutcomeLaneForEvent(event);
+    for (const role of productUsageRolesForEvent(event, actorRoles)) {
+      const key: BucketKey = `${role}:${lane}`;
+      const bucket = buckets.get(key) ?? { role, lane, counts: new Map<RecommendationOutcomeCategory, number>() };
+      bucket.counts.set(outcomeCategory, (bucket.counts.get(outcomeCategory) ?? 0) + 1);
+      buckets.set(key, bucket);
+    }
+  }
+
+  return [...buckets.values()]
+    .sort((a, b) => productUsageRoleSortValue(a.role) - productUsageRoleSortValue(b.role) || a.lane.localeCompare(b.lane))
+    .map(({ role, lane, counts }) => ({
+      role,
+      lane,
+      byOutcomeCategory: [...counts.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([outcomeCategory, count]): RecommendationQualityDimensionCount => ({ outcomeCategory, count })),
+    }));
+}
+
 function productUsageActorSet(events: ProductUsageEventRecord[], predicate: (event: ProductUsageEventRecord) => boolean): Set<string> {
   return new Set(events.filter(predicate).map((event) => event.actorHash).filter(isNonEmptyString));
 }
@@ -3649,6 +3706,7 @@ const PRODUCT_USAGE_RETENTION_WINDOWS: Array<{ window: ProductUsageRetentionRoll
 const MCP_COMPATIBILITY_ADOPTION_SCAN_LIMIT = 5000;
 const PRODUCT_USAGE_ACTOR_REDACTION_MAX_CHARS = 256;
 const PRODUCT_USAGE_ROLE_ORDER: ProductUsageRole[] = ["miner", "maintainer", "owner", "operator", "contributor", "unknown"];
+const RECOMMENDATION_OUTCOME_CATEGORIES = new Set<RecommendationOutcomeCategory>(["accepted", "rejected", "ignored", "stale", "merged", "closed", "improved"]);
 const PRODUCT_USAGE_USEFUL_ACTION_EVENTS = new Set([
   "command_previewed",
   "pull_context_viewed",

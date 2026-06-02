@@ -924,4 +924,154 @@ describe("product usage events", () => {
       ]),
     });
   });
+
+  it("rolls up recommendation quality by role and outcome category", async () => {
+    const env = createTestEnv({ PRODUCT_USAGE_HASH_SALT: "fixed-test-salt" });
+    const day = "2026-06-22";
+
+    // miner accepting a recommendation
+    await recordProductUsageEvent(env, {
+      surface: "mcp",
+      eventName: "agent_command_replied",
+      actor: "miner-actor",
+      outcome: "completed",
+      metadata: { role: "miner", outcomeCategory: "accepted" },
+      occurredAt: `${day}T01:00:00.000Z`,
+    });
+    // same miner ignoring another recommendation
+    await recordProductUsageEvent(env, {
+      surface: "mcp",
+      eventName: "agent_command_replied",
+      actor: "miner-actor",
+      outcome: "completed",
+      metadata: { role: "miner", outcomeCategory: "ignored" },
+      occurredAt: `${day}T02:00:00.000Z`,
+    });
+    // maintainer rejecting a recommendation (maintainer lane)
+    await recordProductUsageEvent(env, {
+      surface: "github_app",
+      eventName: "agent_command_replied",
+      actor: "maintainer-actor",
+      outcome: "completed",
+      metadata: { actorKind: "maintainer", outcomeCategory: "rejected" },
+      occurredAt: `${day}T03:00:00.000Z`,
+    });
+    // non-recommendation event — must not appear in quality rollup
+    await recordProductUsageEvent(env, {
+      surface: "control_panel",
+      eventName: "auth_session_created",
+      actor: "miner-actor",
+      outcome: "success",
+      metadata: { role: "miner" },
+      occurredAt: `${day}T04:00:00.000Z`,
+    });
+
+    const result = await rollupProductUsageDaily(env, { day, nowIso: "2026-06-23T00:00:00.000Z" });
+    const quality = result.rollups[0]?.qualityByRoleOutcome ?? [];
+
+    // miner contributor lane: accepted=1, ignored=1
+    const minerContributor = quality.find((q) => q.role === "miner" && q.lane === "contributor");
+    expect(minerContributor).toBeDefined();
+    expect(minerContributor?.byOutcomeCategory).toEqual(
+      expect.arrayContaining([
+        { outcomeCategory: "accepted", count: 1 },
+        { outcomeCategory: "ignored", count: 1 },
+      ]),
+    );
+
+    // maintainer lane: rejected=1
+    const maintainerLane = quality.find((q) => q.role === "maintainer" && q.lane === "maintainer");
+    expect(maintainerLane).toBeDefined();
+    expect(maintainerLane?.byOutcomeCategory).toEqual([{ outcomeCategory: "rejected", count: 1 }]);
+
+    // no raw actor identifiers in serialised output
+    expect(JSON.stringify(quality)).not.toMatch(/miner-actor|maintainer-actor|fixed-test-salt/i);
+  });
+
+  it("keeps maintainer-lane and contributor-lane outcome counts strictly separate", async () => {
+    const env = createTestEnv({ PRODUCT_USAGE_HASH_SALT: "fixed-test-salt" });
+    const day = "2026-06-23";
+
+    // contributor-lane miner accepted
+    await recordProductUsageEvent(env, {
+      surface: "mcp",
+      eventName: "agent_command_replied",
+      actor: "miner-x",
+      outcome: "completed",
+      metadata: { role: "miner", outcomeCategory: "accepted" },
+      occurredAt: `${day}T01:00:00.000Z`,
+    });
+    // maintainer-lane miner (same role, different lane) rejected
+    await recordProductUsageEvent(env, {
+      surface: "github_app",
+      eventName: "agent_command_replied",
+      actor: "miner-x",
+      outcome: "completed",
+      metadata: { role: "miner", actorKind: "maintainer", outcomeCategory: "rejected" },
+      occurredAt: `${day}T02:00:00.000Z`,
+    });
+
+    const result = await rollupProductUsageDaily(env, { day, nowIso: "2026-06-24T00:00:00.000Z" });
+    const quality = result.rollups[0]?.qualityByRoleOutcome ?? [];
+
+    const minerContributor = quality.find((q) => q.role === "miner" && q.lane === "contributor");
+    const minerMaintainer = quality.find((q) => q.role === "miner" && q.lane === "maintainer");
+
+    // lanes must not be mixed: contributor lane sees only "accepted"
+    expect(minerContributor?.byOutcomeCategory).toEqual([{ outcomeCategory: "accepted", count: 1 }]);
+    // maintainer lane sees only "rejected"
+    expect(minerMaintainer?.byOutcomeCategory).toEqual([{ outcomeCategory: "rejected", count: 1 }]);
+  });
+
+  it("omits quality rollup entries for events without a recognized outcomeCategory", async () => {
+    const env = createTestEnv({ PRODUCT_USAGE_HASH_SALT: "fixed-test-salt" });
+    const day = "2026-06-24";
+
+    // event with unrecognized category value
+    await recordProductUsageEvent(env, {
+      surface: "mcp",
+      eventName: "agent_command_replied",
+      actor: "miner-y",
+      outcome: "completed",
+      metadata: { role: "miner", outcomeCategory: "not_a_real_category" },
+      occurredAt: `${day}T01:00:00.000Z`,
+    });
+    // event with no outcomeCategory at all
+    await recordProductUsageEvent(env, {
+      surface: "mcp",
+      eventName: "mcp_request",
+      actor: "miner-y",
+      outcome: "success",
+      metadata: { role: "miner" },
+      occurredAt: `${day}T02:00:00.000Z`,
+    });
+
+    const result = await rollupProductUsageDaily(env, { day, nowIso: "2026-06-25T00:00:00.000Z" });
+    expect(result.rollups[0]?.qualityByRoleOutcome).toEqual([]);
+  });
+
+  it("persists and reloads quality rollup round-trip without data loss", async () => {
+    const env = createTestEnv({ PRODUCT_USAGE_HASH_SALT: "fixed-test-salt" });
+    const day = "2026-06-25";
+
+    await recordProductUsageEvent(env, {
+      surface: "mcp",
+      eventName: "agent_command_replied",
+      actor: "miner-z",
+      outcome: "completed",
+      metadata: { role: "miner", outcomeCategory: "merged" },
+      occurredAt: `${day}T01:00:00.000Z`,
+    });
+
+    await rollupProductUsageDaily(env, { day, nowIso: "2026-06-26T00:00:00.000Z" });
+    const reloaded = await listProductUsageDailyRollups(env, { fromDay: day, limit: 1 });
+
+    expect(reloaded[0]?.qualityByRoleOutcome).toEqual([
+      {
+        role: "miner",
+        lane: "contributor",
+        byOutcomeCategory: [{ outcomeCategory: "merged", count: 1 }],
+      },
+    ]);
+  });
 });

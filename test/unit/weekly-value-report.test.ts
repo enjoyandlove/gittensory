@@ -371,6 +371,7 @@ function rollup(
     activationByRole: [],
     activationBySurface: [],
     retention: [],
+    qualityByRoleOutcome: [],
     generatedAt: `${day}T23:59:00.000Z`,
     updatedAt: `${day}T23:59:00.000Z`,
   };
