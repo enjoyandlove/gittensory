@@ -448,11 +448,17 @@ export const agentActions = sqliteTable(
     approvalRequired: integer("approval_required", { mode: "boolean" }).notNull().default(true),
     safetyClass: text("safety_class").notNull(),
     payloadJson: text("payload_json").notNull().default("{}"),
+    // #281: stable link to the context snapshot that produced this action
+    decisionSnapshotId: text("decision_snapshot_id"),
+    // #284: counterfactual reasoning
+    alternativesConsideredJson: text("alternatives_considered_json").notNull().default("[]"),
+    counterfactualReasonsJson: text("counterfactual_reasons_json").notNull().default("[]"),
     createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   },
   (table) => ({
     runAction: index("agent_actions_run_action_idx").on(table.runId, table.actionType),
     targetRepo: index("agent_actions_target_repo_idx").on(table.targetRepoFullName, table.createdAt),
+    snapshotCreated: index("agent_actions_snapshot_idx").on(table.decisionSnapshotId, table.createdAt),
   }),
 );
 
@@ -466,10 +472,17 @@ export const agentContextSnapshots = sqliteTable(
     scoringModelId: text("scoring_model_id"),
     freshnessWarningsJson: text("freshness_warnings_json").notNull().default("[]"),
     payloadJson: text("payload_json").notNull().default("{}"),
+    // #282: provenance fields for replay
+    actorLogin: text("actor_login"),
+    decisionPackGeneratedAt: text("decision_pack_generated_at"),
+    confidenceLevel: text("confidence_level"),
+    freshnessAtDecision: text("freshness_at_decision"),
+    upstreamRulesetId: text("upstream_ruleset_id"),
     createdAt: text("created_at").notNull().default("CURRENT_TIMESTAMP"),
   },
   (table) => ({
     runCreated: index("agent_context_snapshots_run_created_idx").on(table.runId, table.createdAt),
+    actorCreated: index("agent_context_snapshots_actor_idx").on(table.actorLogin, table.createdAt),
   }),
 );
 

@@ -84,6 +84,8 @@ import {
   upsertContributorEvidence,
   upsertContributorScoringProfile,
   upsertRepositorySettings,
+  getAgentContextSnapshot,
+  listAgentActions,
 } from "../db/repositories";
 import {
   backfillOpenPullRequestDetails,
@@ -1699,6 +1701,34 @@ export function createApp() {
     const unauthorized = await requireContributorAccess(c, bundle.run.actorLogin);
     if (unauthorized) return unauthorized;
     return c.json(bundle);
+  });
+
+  // #285: decision snapshot replay — returns context + actions for a specific snapshot ID
+  app.get("/v1/agent/snapshots/:snapshotId", async (c) => {
+    const snapshotId = c.req.param("snapshotId");
+    const context = await getAgentContextSnapshot(c.env, snapshotId);
+    if (!context) return c.json({ error: "decision_snapshot_not_found" }, 404);
+    const bundle = await getAgentRunBundle(c.env, context.runId);
+    if (!bundle) return c.json({ error: "agent_run_not_found" }, 404);
+    const unauthorized = await requireContributorAccess(c, bundle.run.actorLogin);
+    if (unauthorized) return unauthorized;
+    const actions = await listAgentActions(c.env, context.runId);
+    const snapshotActions = actions.filter((action) => action.decisionSnapshotId === snapshotId);
+    const replay = {
+      snapshotId,
+      replayedAt: new Date().toISOString(),
+      run: {
+        id: bundle.run.id,
+        objective: bundle.run.objective,
+        actorLogin: bundle.run.actorLogin,
+        surface: bundle.run.surface,
+        status: bundle.run.status,
+        createdAt: bundle.run.createdAt,
+      },
+      context,
+      actions: snapshotActions,
+    };
+    return c.json(replay);
   });
 
   app.post("/v1/agent/plan-next-work", async (c) => {

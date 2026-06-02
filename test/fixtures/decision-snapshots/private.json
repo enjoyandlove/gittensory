@@ -1,0 +1,59 @@
+{
+  "context": {
+    "id": "snap-private-001",
+    "runId": "run-001",
+    "decisionPackVersion": "2026-01-15T10:00:00.000Z",
+    "repoSignalSnapshotIds": [],
+    "scoringModelId": "model-abc",
+    "freshnessWarnings": [],
+    "actorLogin": "contributor-a",
+    "decisionPackGeneratedAt": "2026-01-15T10:00:00.000Z",
+    "confidenceLevel": "high",
+    "freshnessAtDecision": "fresh",
+    "upstreamRulesetId": null,
+    "createdAt": "2026-01-15T10:01:00.000Z",
+    "payload": {
+      "login": "contributor-a",
+      "source": "computed",
+      "selectedRepos": ["org/repo-one"],
+      "dataQuality": { "signalFidelity": { "status": "complete", "partialRepos": [], "cappedRepos": [], "staleRepos": [], "rateLimitedRepos": [] } }
+    }
+  },
+  "actions": [
+    {
+      "id": "run-001:00:choose_next_work",
+      "runId": "run-001",
+      "actionType": "choose_next_work",
+      "targetRepoFullName": "org/repo-one",
+      "targetPullNumber": null,
+      "targetIssueNumber": null,
+      "status": "recommended",
+      "recommendation": "org/repo-one: pick narrow work and run branch preflight before opening a PR.",
+      "why": ["Lane fit is strong.", "Priority score is 87."],
+      "scoreabilityImpact": "Lane fit: direct; direct PR share 0.4.",
+      "riskImpact": "No major repo-specific risk is visible in the current decision pack.",
+      "maintainerImpact": "Narrow, validated work with clear lane fit is easier to review.",
+      "blockedBy": [],
+      "rerunWhen": "Rerun before opening a PR or when repo queue/registry signals change.",
+      "publicSafeSummary": "org/repo-one: Use Gittensory preflight before posting public PR context.",
+      "approvalRequired": true,
+      "safetyClass": "private",
+      "decisionSnapshotId": "snap-private-001",
+      "alternativesConsidered": ["org/repo-two ranked avoid_for_now at priority 12"],
+      "counterfactualReasons": ["If open PR queue clears, recommendation changes to pursue."],
+      "payload": {
+        "recommendationEvidence": {
+          "confidence": "high",
+          "sourceSummary": "Ranked next-action recommendation from the contributor decision pack.",
+          "freshness": "fresh",
+          "sources": [],
+          "assumptions": [],
+          "warnings": [],
+          "userSuppliedScenarios": false,
+          "userSuppliedScenarioCount": 0
+        }
+      },
+      "createdAt": "2026-01-15T10:01:00.000Z"
+    }
+  ]
+}

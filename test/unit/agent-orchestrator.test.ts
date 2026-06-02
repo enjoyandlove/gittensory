@@ -565,7 +565,7 @@ describe("agent orchestrator", () => {
     });
     expect(__agentOrchestratorInternals.buildOpenPrMonitorActions(monitorRun, nonUrgentPack, [])).toEqual([]);
 
-    const snapshot = __agentOrchestratorInternals.contextSnapshotFromPack("run-1", decisionPackFixture({
+    const snapshot = __agentOrchestratorInternals.contextSnapshotFromPack("run-1", "oktofeesh1", decisionPackFixture({
       generatedAt,
       freshness: "rebuilding",
       snapshotAgeSeconds: 90,
@@ -602,7 +602,7 @@ describe("agent orchestrator", () => {
     expect(snapshot.payload.evidenceGraph).toMatchObject({ selectedRepos: [expect.objectContaining({ repoFullName: readyDecision.repoFullName })] });
     expect(snapshot.payload.openPrMonitor).toBeNull();
 
-    const staleSnapshot = __agentOrchestratorInternals.contextSnapshotFromPack("run-2", decisionPackFixture({
+    const staleSnapshot = __agentOrchestratorInternals.contextSnapshotFromPack("run-2", "oktofeesh1", decisionPackFixture({
       generatedAt,
       freshness: "stale",
       openPrMonitor: approvedPack.openPrMonitor,

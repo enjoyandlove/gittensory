@@ -1,0 +1,30 @@
+{
+  "note": "Public-safe projection — only publicSafeSummary and non-private fields are surfaced. No payload, no recommendationEvidence, no scoreabilityImpact, no private blockers.",
+  "actions": [
+    {
+      "id": "run-001:00:prepare_pr_packet",
+      "targetRepoFullName": "org/repo-one",
+      "actionType": "prepare_pr_packet",
+      "status": "ready",
+      "publicSafeSummary": "org/repo-one: public-safe PR packet prepared from metadata only.",
+      "rerunWhen": "Rerun before opening a PR or when repo queue/registry signals change.",
+      "safetyClass": "public_safe",
+      "approvalRequired": false
+    }
+  ],
+  "forbiddenInPublicOutput": [
+    "reward",
+    "payout",
+    "farming",
+    "estimated score",
+    "raw trust score",
+    "wallet",
+    "hotkey",
+    "coldkey",
+    "scoreabilityImpact",
+    "recommendationEvidence",
+    "alternativesConsidered",
+    "counterfactualReasons",
+    "payload"
+  ]
+}

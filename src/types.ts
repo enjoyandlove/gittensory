@@ -649,6 +649,11 @@ export type AgentActionRecord = {
   approvalRequired: boolean;
   safetyClass: AgentSafetyClass;
   payload: Record<string, JsonValue>;
+  // #281: stable link to the context snapshot that produced this action
+  decisionSnapshotId?: string | null | undefined;
+  // #284: counterfactual reasoning — what else was considered and what would flip this
+  alternativesConsidered?: string[] | undefined;
+  counterfactualReasons?: string[] | undefined;
   createdAt?: string | null | undefined;
 };
 
@@ -660,7 +665,29 @@ export type AgentContextSnapshotRecord = {
   scoringModelId?: string | null | undefined;
   freshnessWarnings: string[];
   payload: Record<string, JsonValue>;
+  // #282: provenance fields for replay
+  actorLogin?: string | null | undefined;
+  decisionPackGeneratedAt?: string | null | undefined;
+  confidenceLevel?: string | null | undefined;
+  freshnessAtDecision?: string | null | undefined;
+  upstreamRulesetId?: string | null | undefined;
   createdAt?: string | null | undefined;
+};
+
+// #285: full decision snapshot replay — context + actions + run summary (public-safe)
+export type DecisionSnapshotReplay = {
+  snapshotId: string;
+  replayedAt: string;
+  run: {
+    id: string;
+    objective: string;
+    actorLogin: string;
+    surface: AgentSurface;
+    status: AgentRunStatus;
+    createdAt?: string | null | undefined;
+  };
+  context: AgentContextSnapshotRecord;
+  actions: AgentActionRecord[];
 };
 
 export type InstallationRecord = {

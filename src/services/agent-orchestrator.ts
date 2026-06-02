@@ -257,11 +257,12 @@ async function executeDecisionPackRun(env: Env, run: AgentRunRecord, kind: strin
   const decisions = repoFullName ? pack.repoDecisions.filter((decision) => sameRepo(decision.repoFullName, repoFullName)) : pack.repoDecisions;
   const allowCrossRepoFallback = !repoFullName || run.surface !== "github_comment";
   const scopedDecisionActions = decisions.length > 0 ? decisions : allowCrossRepoFallback ? pack.repoDecisions : [];
+  const contextSnapshot = contextSnapshotFromPack(run.id, run.actorLogin, pack, decisions);
   const actions =
     kind === "explain_blockers"
-      ? buildBlockerActions(run, pack, decisions, { allowFallback: allowCrossRepoFallback })
-      : buildDecisionActions(run, pack, scopedDecisionActions);
-  const contexts = [contextSnapshotFromPack(run.id, pack, decisions)];
+      ? buildBlockerActions(run, pack, decisions, { allowFallback: allowCrossRepoFallback, snapshotId: contextSnapshot.id })
+      : buildDecisionActions(run, pack, scopedDecisionActions, contextSnapshot.id);
+  const contexts = [contextSnapshot];
   await replaceAgentActions(env, run.id, actions);
   await persistAgentContextSnapshot(env, contexts[0]!);
   const dataQualityStatus = isStale ? "degraded" : pack.dataQuality.signalFidelity.status;
@@ -299,6 +300,10 @@ async function executeLocalBranchRun(env: Env, run: AgentRunRecord, kind: string
     scoringModelId: analysis.scorePreview.scoringModelSnapshotId,
     repoSignalSnapshotIds: [],
     freshnessWarnings: [...analysis.baseFreshness.warnings, ...(analysis.dataQuality?.warnings ?? [])],
+    actorLogin: run.actorLogin,
+    decisionPackGeneratedAt: analysis.generatedAt,
+    confidenceLevel: "medium",
+    freshnessAtDecision: analysis.baseFreshness.status,
     payload: {
       repoFullName: analysis.repoFullName,
       baseFreshness: analysis.baseFreshness as unknown as JsonValue,
@@ -307,7 +312,8 @@ async function executeLocalBranchRun(env: Env, run: AgentRunRecord, kind: string
       dataQuality: (analysis.dataQuality ?? null) as unknown as JsonValue,
     },
   };
-  await replaceAgentActions(env, run.id, actions);
+  const actionsWithSnapshot = actions.map((action) => ({ ...action, decisionSnapshotId: context.id }));
+  await replaceAgentActions(env, run.id, actionsWithSnapshot);
   await persistAgentContextSnapshot(env, context);
   await updateAgentRun(env, run.id, {
     status: "completed",
@@ -370,19 +376,19 @@ async function loadCheckSummariesForPullRequests(env: Env, repoFullName: string,
   return currentPullRequest ? listCheckSummaries(env, repoFullName, currentPullRequest.number) : [];
 }
 
-function buildDecisionActions(run: AgentRunRecord, pack: ContributorDecisionPack, decisions: RepoDecision[]): AgentActionRecord[] {
+function buildDecisionActions(run: AgentRunRecord, pack: ContributorDecisionPack, decisions: RepoDecision[], snapshotId?: string | undefined): AgentActionRecord[] {
   const decisionByRepo = new Map(decisions.map((decision) => [decision.repoFullName, decision]));
-  const monitorActions = buildOpenPrMonitorActions(run, pack, decisions);
+  const monitorActions = buildOpenPrMonitorActions(run, pack, decisions, snapshotId);
   const candidateActions = pack.topActions
     .filter((action) => decisionByRepo.has(action.repoFullName))
     .slice(0, 8)
-    .map((action, index) => actionFromDecisionAction(run, action, decisionByRepo.get(action.repoFullName)!, monitorActions.length + index, pack));
+    .map((action, index) => actionFromDecisionAction(run, action, decisionByRepo.get(action.repoFullName)!, monitorActions.length + index, pack, snapshotId));
   if (candidateActions.length > 0) return [...monitorActions, ...candidateActions].slice(0, 8);
-  const fallback = decisions.slice(0, 5).map((decision, index) => actionFromRepoDecision(run, decision, monitorActions.length + index, pack));
+  const fallback = decisions.slice(0, 5).map((decision, index) => actionFromRepoDecision(run, decision, monitorActions.length + index, pack, snapshotId));
   return [...monitorActions, ...fallback].slice(0, 8);
 }
 
-function buildOpenPrMonitorActions(run: AgentRunRecord, pack: ContributorDecisionPack, decisions: RepoDecision[]): AgentActionRecord[] {
+function buildOpenPrMonitorActions(run: AgentRunRecord, pack: ContributorDecisionPack, decisions: RepoDecision[], snapshotId?: string | undefined): AgentActionRecord[] {
   const monitor = pack.openPrMonitor;
   if (!monitor || monitor.pullRequests.length === 0) return [];
   const decisionByRepo = new Map(decisions.map((decision) => [decision.repoFullName.toLowerCase(), decision]));
@@ -423,6 +429,9 @@ function buildOpenPrMonitorActions(run: AgentRunRecord, pack: ContributorDecisio
         evidence: decisionPackEvidence(pack, decision, "Open PR monitor recommendation from cached GitHub queue state."),
         safetyClass: "public_safe",
         approvalRequired: false,
+        decisionSnapshotId: snapshotId,
+        alternativesConsidered: [`New work deferred until PR #${packet.number} is resolved.`],
+        counterfactualReasons: [`If PR #${packet.number} merges or closes, recommendation changes to choose_next_work.`],
       });
     });
 }
@@ -431,7 +440,7 @@ function buildBlockerActions(
   run: AgentRunRecord,
   pack: ContributorDecisionPack,
   decisions: RepoDecision[],
-  options: { allowFallback?: boolean } = {},
+  options: { allowFallback?: boolean; snapshotId?: string | undefined } = {},
 ): AgentActionRecord[] {
   const selected = decisions.length > 0 ? decisions : options.allowFallback === false ? [] : pack.repoDecisions.filter((decision) => decision.scoreBlockers.length > 0).slice(0, 6);
   return selected.slice(0, 8).map((decision, index) =>
@@ -451,6 +460,9 @@ function buildBlockerActions(
       publicSafeSummary: `${decision.repoFullName}: blocker context is available privately; public output should stay focused on review hygiene.`,
       payload: { decision: decision as unknown as JsonValue },
       evidence: decisionPackEvidence(pack, decision, "Scoreability blocker explanation from the contributor decision pack."),
+      decisionSnapshotId: options.snapshotId,
+      alternativesConsidered: decision.scoreBlockers.length === 0 ? [] : [`pursue ranked below due to ${decision.scoreBlockers.map((b) => b.code).join(", ")}`],
+      counterfactualReasons: decision.scoreBlockers.map((b) => `If ${b.code} resolves, this repo may become scoreable.`),
     }),
   );
 }
@@ -529,7 +541,7 @@ function localPrPacketAction(run: AgentRunRecord, analysis: LocalBranchActionAna
   });
 }
 
-function actionFromDecisionAction(run: AgentRunRecord, action: DecisionAction, decision: RepoDecision, index: number, pack?: ContributorDecisionPack | undefined): AgentActionRecord {
+function actionFromDecisionAction(run: AgentRunRecord, action: DecisionAction, decision: RepoDecision, index: number, pack?: ContributorDecisionPack | undefined, snapshotId?: string | undefined): AgentActionRecord {
   return actionRecord({
     run,
     actionType: mapDecisionAction(action.actionKind),
@@ -549,10 +561,13 @@ function actionFromDecisionAction(run: AgentRunRecord, action: DecisionAction, d
       decision: decision as unknown as JsonValue,
     },
     evidence: pack ? decisionPackEvidence(pack, decision, "Ranked next-action recommendation from the contributor decision pack.") : repoDecisionEvidence(decision),
+    decisionSnapshotId: snapshotId,
+    alternativesConsidered: buildAlternativesConsidered(decision, pack),
+    counterfactualReasons: buildCounterfactualReasons(decision),
   });
 }
 
-function actionFromRepoDecision(run: AgentRunRecord, decision: RepoDecision, index: number, pack?: ContributorDecisionPack | undefined): AgentActionRecord {
+function actionFromRepoDecision(run: AgentRunRecord, decision: RepoDecision, index: number, pack?: ContributorDecisionPack | undefined, snapshotId?: string | undefined): AgentActionRecord {
   return actionRecord({
     run,
     actionType: "explain_repo_fit",
@@ -569,6 +584,9 @@ function actionFromRepoDecision(run: AgentRunRecord, decision: RepoDecision, ind
     publicSafeSummary: sanitizePublicSummary(decision.publicNextActions?.[0] ?? `${decision.repoFullName}: Use local branch preflight before posting.`),
     payload: { decision: decision as unknown as JsonValue },
     evidence: pack ? decisionPackEvidence(pack, decision, "Repo-fit fallback recommendation from the contributor decision pack.") : repoDecisionEvidence(decision),
+    decisionSnapshotId: snapshotId,
+    alternativesConsidered: buildAlternativesConsidered(decision, pack),
+    counterfactualReasons: buildCounterfactualReasons(decision),
   });
 }
 
@@ -592,6 +610,9 @@ function actionRecord(args: {
   safetyClass?: AgentSafetyClass | undefined;
   payload: Record<string, JsonValue>;
   evidence?: RecommendationEvidence | undefined;
+  decisionSnapshotId?: string | undefined;
+  alternativesConsidered?: string[] | undefined;
+  counterfactualReasons?: string[] | undefined;
 }): AgentActionRecord {
   const evidence = args.evidence ?? defaultRecommendationEvidence(args.actionType);
   return {
@@ -616,6 +637,9 @@ function actionRecord(args: {
       ...args.payload,
       recommendationEvidence: evidence as unknown as JsonValue,
     },
+    decisionSnapshotId: args.decisionSnapshotId,
+    alternativesConsidered: (args.alternativesConsidered ?? []).filter(Boolean).slice(0, 6),
+    counterfactualReasons: (args.counterfactualReasons ?? []).filter(Boolean).slice(0, 6),
     createdAt: nowIso(),
   };
 }
@@ -819,7 +843,26 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
-function contextSnapshotFromPack(runId: string, pack: ContributorDecisionPack, decisions: RepoDecision[]): AgentContextSnapshotRecord {
+function buildAlternativesConsidered(decision: RepoDecision, pack: ContributorDecisionPack | undefined): string[] {
+  if (!pack) return [];
+  const others = pack.repoDecisions
+    .filter((d) => d.repoFullName !== decision.repoFullName)
+    .slice(0, 3)
+    .map((d) => `${d.repoFullName} ranked ${d.recommendation} at priority ${d.priorityScore}`);
+  return others;
+}
+
+function buildCounterfactualReasons(decision: RepoDecision): string[] {
+  const reasons: string[] = [];
+  for (const blocker of decision.scoreBlockers.slice(0, 3)) {
+    reasons.push(`If ${blocker.code} resolves, recommendation may change from ${decision.recommendation}.`);
+  }
+  if (decision.recommendation === "cleanup_first") reasons.push("If open PR queue clears, recommendation changes to pursue.");
+  if (decision.recommendation === "avoid_for_now" && decision.riskReasons.length > 0) reasons.push(`If risk factors resolve (${decision.riskReasons[0]}), repo may become pursueable.`);
+  return reasons.slice(0, 4);
+}
+
+function contextSnapshotFromPack(runId: string, actorLogin: string, pack: ContributorDecisionPack, decisions: RepoDecision[]): AgentContextSnapshotRecord {
   const fidelity = pack.dataQuality.signalFidelity;
   const ageSeconds = pack.snapshotAgeSeconds ?? null;
   const ageNote = ageSeconds !== null ? ` (age ${ageSeconds}s)` : "";
@@ -836,6 +879,9 @@ function contextSnapshotFromPack(runId: string, pack: ContributorDecisionPack, d
     ...fidelity.staleRepos.map((repo) => `${repo}: stale signal coverage`),
     ...fidelity.rateLimitedRepos.map((repo) => `${repo}: rate limited signal coverage`),
   ];
+  const overallConfidence = decisions.length > 0
+    ? confidenceForDecisionPack(pack, decisions[0]!, repoSignalQuality(pack, decisions[0]!.repoFullName), 0)
+    : "medium";
   return {
     id: crypto.randomUUID(),
     runId,
@@ -843,6 +889,10 @@ function contextSnapshotFromPack(runId: string, pack: ContributorDecisionPack, d
     repoSignalSnapshotIds: [],
     scoringModelId: pack.scoringModelSnapshotId,
     freshnessWarnings: warnings,
+    actorLogin,
+    decisionPackGeneratedAt: pack.generatedAt,
+    confidenceLevel: overallConfidence,
+    freshnessAtDecision: pack.freshness,
     payload: {
       login: pack.login,
       source: pack.source,
@@ -954,4 +1004,6 @@ export const __agentOrchestratorInternals = {
   sanitizePublicSummary,
   jsonPayload,
   sameRepo,
+  buildAlternativesConsidered,
+  buildCounterfactualReasons,
 };

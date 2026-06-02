@@ -2305,6 +2305,9 @@ export async function replaceAgentActions(env: Env, runId: string, actions: Agen
       approvalRequired: action.approvalRequired,
       safetyClass: action.safetyClass,
       payloadJson: jsonString(action.payload),
+      decisionSnapshotId: action.decisionSnapshotId ?? null,
+      alternativesConsideredJson: jsonString(action.alternativesConsidered),
+      counterfactualReasonsJson: jsonString(action.counterfactualReasons),
       createdAt: action.createdAt ?? nowIso(),
     });
   }
@@ -2322,9 +2325,20 @@ export async function persistAgentContextSnapshot(env: Env, snapshot: AgentConte
     scoringModelId: snapshot.scoringModelId ?? null,
     freshnessWarningsJson: jsonString(snapshot.freshnessWarnings),
     payloadJson: jsonString(snapshot.payload),
+    actorLogin: snapshot.actorLogin ?? null,
+    decisionPackGeneratedAt: snapshot.decisionPackGeneratedAt ?? null,
+    confidenceLevel: snapshot.confidenceLevel ?? null,
+    freshnessAtDecision: snapshot.freshnessAtDecision ?? null,
+    upstreamRulesetId: snapshot.upstreamRulesetId ?? null,
     createdAt: snapshot.createdAt ?? nowIso(),
   });
   /* v8 ignore stop */
+}
+
+export async function getAgentContextSnapshot(env: Env, snapshotId: string): Promise<AgentContextSnapshotRecord | null> {
+  const db = getDb(env.DB);
+  const rows = await db.select().from(agentContextSnapshots).where(eq(agentContextSnapshots.id, snapshotId)).limit(1);
+  return rows[0] ? toAgentContextSnapshotRecord(rows[0]) : null;
 }
 
 export async function listAgentContextSnapshots(env: Env, runId: string): Promise<AgentContextSnapshotRecord[]> {
@@ -2981,6 +2995,9 @@ function toAgentActionRecord(row: typeof agentActions.$inferSelect): AgentAction
     approvalRequired: row.approvalRequired,
     safetyClass: parseAgentSafetyClass(row.safetyClass),
     payload: parseJson<Record<string, JsonValue>>(row.payloadJson, {}),
+    decisionSnapshotId: row.decisionSnapshotId,
+    alternativesConsidered: parseJson<string[]>(row.alternativesConsideredJson, []),
+    counterfactualReasons: parseJson<string[]>(row.counterfactualReasonsJson, []),
     createdAt: row.createdAt,
   };
 }
@@ -2994,6 +3011,11 @@ function toAgentContextSnapshotRecord(row: typeof agentContextSnapshots.$inferSe
     scoringModelId: row.scoringModelId,
     freshnessWarnings: parseJson<string[]>(row.freshnessWarningsJson, []),
     payload: parseJson<Record<string, JsonValue>>(row.payloadJson, {}),
+    actorLogin: row.actorLogin,
+    decisionPackGeneratedAt: row.decisionPackGeneratedAt,
+    confidenceLevel: row.confidenceLevel,
+    freshnessAtDecision: row.freshnessAtDecision,
+    upstreamRulesetId: row.upstreamRulesetId,
     createdAt: row.createdAt,
   };
 }
