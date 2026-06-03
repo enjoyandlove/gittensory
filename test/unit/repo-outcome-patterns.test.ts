@@ -397,6 +397,7 @@ describe("buildRepoOutcomePatterns", () => {
 
   it("includes merged-only PRs absent from pull_requests in the analysis", () => {
     // Repo has 5 open/closed PRs in pull_requests and 200 merged PRs only in recent_merged_pull_requests.
+    // The merged-only records carry author_association: "NONE" so they are outside-contributor lane.
     // Without the fix: merge rate = 0/3, triggering false "high closure risk".
     // With the fix: merge rate = ~0.97 from the full unified set.
     const pullRequests: PullRequestRecord[] = [
@@ -415,7 +416,7 @@ describe("buildRepoOutcomePatterns", () => {
       labels: ["bug"],
       linkedIssues: [200 + i],
       changedFiles: ["src/feature.ts"],
-      payload: {},
+      payload: { author_association: "NONE" },
     }));
     const result = buildRepoOutcomePatterns({ repo: repo(), repoFullName: REPO, pullRequests, recentMergedPullRequests });
 
@@ -425,6 +426,36 @@ describe("buildRepoOutcomePatterns", () => {
     expect(result.outsideContributorMergeRate).toBeCloseTo(200 / 203, 4);
     expect(result.riskPatterns.some((p) => p.title === "Outside contributor PRs rarely merge here")).toBe(false);
     expect(result.successPatterns.some((p) => p.title === "Outside contributors merge well here")).toBe(true);
+  });
+
+  it("conservatively excludes merged-only PRs with unknown author_association from outside-contributor statistics", () => {
+    // Merged-only records with payload: {} (no author_association) cannot be safely classified.
+    // Conservative fallback: treat as maintainer lane so they do not inflate outside-contributor merge rate.
+    const pullRequests: PullRequestRecord[] = [
+      closedPr(1),
+      closedPr(2),
+      mergedPr(3, { authorAssociation: "NONE" }),
+    ];
+    const recentMergedPullRequests: RecentMergedPullRequestRecord[] = Array.from({ length: 10 }, (_, i) => ({
+      repoFullName: REPO,
+      number: 100 + i,
+      title: `Unknown-assoc PR ${100 + i}`,
+      authorLogin: "dev",
+      mergedAt: "2026-05-01T00:00:00.000Z",
+      labels: [],
+      linkedIssues: [],
+      changedFiles: [],
+      payload: {},
+    }));
+    const result = buildRepoOutcomePatterns({ repo: repo(), repoFullName: REPO, pullRequests, recentMergedPullRequests });
+
+    expect(result.totals.analyzed).toBe(13);
+    expect(result.totals.maintainerLanePullRequests).toBe(10);
+    expect(result.totals.outsideContributorPullRequests).toBe(3);
+    // Outside-contributor rate uses only the 3 classifiable outside PRs (1 merged, 2 closed).
+    expect(result.outsideContributorMergeRate).toBeCloseTo(1 / 3, 4);
+    // Maintainer lane rate includes the 10 unknown-association merged PRs.
+    expect(result.maintainerLaneMergeRate).toBeCloseTo(1, 4);
   });
 
   it("does not double-count PRs present in both pull_requests and recent_merged_pull_requests", () => {

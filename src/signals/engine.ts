@@ -1863,17 +1863,24 @@ export function buildRepoOutcomePatterns(args: {
     // Include merged PRs that exist only in recent_merged_pull_requests (absent from pull_requests).
     // Derive maintainer lane and author role from payload.author_association when present so that
     // owner/member/collaborator merges are not counted in the outside-contributor merge rate.
+    // Conservative fallback: when author_association is absent or unrecognised, treat as maintainer
+    // lane so the record is excluded from outside-contributor statistics rather than silently
+    // inflating the outside-contributor merge rate with unclassifiable data.
     ...(args.recentMergedPullRequests ?? [])
       .filter((record) => record.repoFullName.toLowerCase() === repoKey && !knownPrNumbers.has(record.number))
       .map((record): RepoOutcomePullRequest => {
         const payloadAssociation = typeof record.payload["author_association"] === "string" ? record.payload["author_association"] : undefined;
+        const knownOutsider = payloadAssociation === "NONE" || payloadAssociation === "CONTRIBUTOR" || payloadAssociation === "FIRST_TIME_CONTRIBUTOR" || payloadAssociation === "FIRST_TIMER";
         const isMaintainer = isMaintainerAssociation(payloadAssociation);
+        // When association is unknown we cannot safely classify the lane — conservative fallback
+        // keeps the record out of the outside-contributor decided set.
+        const maintainerLane = isMaintainer || !knownOutsider;
         return {
           number: record.number,
           bucket: "merged",
           decided: true,
           merged: true,
-          maintainerLane: isMaintainer,
+          maintainerLane,
           linked: record.linkedIssues.length > 0,
           labels: [...record.labels].sort(),
           filePaths: [...record.changedFiles].sort(),
