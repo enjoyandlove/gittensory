@@ -8,6 +8,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { buildBranchAnalysisPayload, collectLocalDiff, collectLocalBranchMetadata, probeLocalScorer, referenceScorePreviewExample, resolveScorePreviewCommand, sanitizeLocalScorerStatus, setupGuidanceForLocalScorer } from "../lib/local-branch.js";
 
+const agentProfileNames = ["miner-planner", "maintainer-triage", "repo-owner-intake"];
 const defaultApiUrl = "https://gittensory-api.aethereal.dev";
 const legacyDefaultApiUrls = new Set(["https://gittensory-api.zeronode.workers.dev"]);
 const packageName = "@jsonbored/gittensory-mcp";
@@ -730,7 +731,7 @@ function printHelp() {
   gittensory-mcp changelog [--json]
   gittensory-mcp doctor [--profile name] [--cwd path] [--json]
   gittensory-mcp cache status|clear [--json]
-  gittensory-mcp init-client --print codex|claude|cursor|mcp [--json]
+  gittensory-mcp init-client --print codex|claude|cursor|mcp [--agent-profile miner-planner|maintainer-triage|repo-owner-intake] [--json]
   gittensory-mcp decision-pack --login <github-login> [--json]
   gittensory-mcp repo-decision --login <github-login> --repo owner/repo [--json]
   gittensory-mcp analyze-branch --login <github-login> [--repo owner/repo] [--base origin/main] [--branch-eligibility eligible|ineligible|unknown] [--pending-merged-prs 3] [--expected-open-prs 0] [--projected-credibility 0.8] [--scenario-note "..."] [--validation "passed|npm test|summary"] [--json]
@@ -1134,23 +1135,81 @@ async function doctor(options) {
   }
 }
 
+function agentProfileInstructions(role) {
+  if (role === "miner-planner") {
+    return [
+      "You are a Gittensory miner-planner agent. Your role is to identify, rank, and prepare work packets for open-source contribution.",
+      "",
+      "Permitted actions: call Gittensory MCP tools to fetch decision packs, analyze branches, run preflights, generate next-action plans, and prepare public-safe PR packets.",
+      "Prohibited actions: you may not open pull requests, post GitHub comments, close or label issues, merge branches, or publish any public GitHub output autonomously. All such actions require explicit human approval before execution.",
+      "",
+      "Safety boundaries:",
+      "- Never expose wallet addresses, hotkeys, coldkeys, private keys, raw trust scores, private maintainer evidence, or session tokens.",
+      "- Public-facing text (PR descriptions, commit messages, issue comments) must pass the Gittensory public-safety filter before you draft or share it.",
+      "- If a tool result includes a `publicSafe: false` field or a safety warning, stop and ask the user before continuing.",
+      "",
+      "Workflow: use `gittensory_agent_plan_next_work` to get ranked tasks, `gittensory_analyze_branch` to evaluate your current branch, `gittensory_preflight` to check submission readiness, and `gittensory_agent_prepare_pr_packet` to draft public-safe PR text for human review.",
+    ].join("\n");
+  }
+  if (role === "maintainer-triage") {
+    return [
+      "You are a Gittensory maintainer-triage agent. Your role is to evaluate incoming contributions and surface reviewer guidance for repository maintainers.",
+      "",
+      "Permitted actions: call Gittensory MCP tools to fetch contributor decision packs, repo-level decisions, and branch analysis for open PRs under review.",
+      "Prohibited actions: you may not merge pull requests, post review comments, approve or request changes, close issues, add labels, or take any GitHub write action autonomously. All write actions require explicit human approval.",
+      "",
+      "Safety boundaries:",
+      "- Never expose raw trust scores, private maintainer evidence, wallet details, hotkeys, coldkeys, or private keys in any output shown to contributors.",
+      "- Distinguish clearly between public-safe summaries (shareable with contributors) and private maintainer context (for maintainer eyes only).",
+      "- If a tool result contains `privateOwnerContext` or is marked `publicSafe: false`, do not include that content in any message directed at contributors.",
+      "",
+      "Workflow: use `gittensory_get_decision_pack` to profile a contributor, `gittensory_get_repo_decision` to assess fit, and `gittensory_analyze_branch` to evaluate a specific PR branch.",
+    ].join("\n");
+  }
+  if (role === "repo-owner-intake") {
+    return [
+      "You are a Gittensory repo-owner-intake agent. Your role is to help repository owners evaluate new contributors and prepare onboarding guidance.",
+      "",
+      "Permitted actions: call Gittensory MCP tools to fetch contributor profiles, registration-readiness reports, onboarding pack previews, and repo-level decision data.",
+      "Prohibited actions: you may not send GitHub invitations, post comments, modify repository settings, change branch protection rules, or take any GitHub write action autonomously. All such actions require explicit human approval.",
+      "",
+      "Safety boundaries:",
+      "- Never expose wallet addresses, hotkeys, coldkeys, private keys, raw trust scores, or private evidence in any output that could reach a contributor.",
+      "- Onboarding text shown to contributors must use only public-safe fields; pass it through `isRepoOnboardingPackPublicSafe` logic before sharing.",
+      "- If a tool result contains `privateOwnerContext` or is marked `publicSafe: false`, treat it as maintainer-only and do not forward it.",
+      "",
+      "Workflow: use `gittensory_get_decision_pack` for contributor evaluation, review the `onboardingPackPreview` field from registration-readiness data for public-safe onboarding text, and present findings to the repo owner for approval before any action.",
+    ].join("\n");
+  }
+  throw new Error(`Unknown agent profile: ${JSON.stringify(role)}. Use one of: ${agentProfileNames.join(", ")}.`);
+}
+
 function initClient(options) {
   const client = String(options.print ?? options.client ?? "").toLowerCase();
   if (!client) throw new Error("Pass --print codex, --print claude, --print cursor, or --print mcp.");
+  const rawRole = options.agentProfile ?? options.role;
+  const role = rawRole ? String(rawRole).toLowerCase() : undefined;
+  if (role && !agentProfileNames.includes(role)) {
+    throw new Error(`Unknown agent profile: ${JSON.stringify(role)}. Use one of: ${agentProfileNames.join(", ")}.`);
+  }
   const command = options.command ?? "gittensory-mcp";
   const snippet = clientSnippet(client, command);
+  const instructions = role ? agentProfileInstructions(role) : undefined;
   const payload = {
     client,
     command,
     args: ["--stdio"],
     snippet,
+    ...(role !== undefined && { agentProfile: role, instructions }),
     notes: [
       "Run `gittensory-mcp login` before starting the MCP client.",
       "Use an absolute command path if the client does not inherit your shell PATH.",
       "This command prints config only; it does not edit client files.",
+      ...(role !== undefined ? ["Copy the instructions into your agent's system prompt or CLAUDE.md / .cursorrules file."] : []),
     ],
   };
   if (options.json) process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  else if (instructions) process.stdout.write(`${snippet}\n\n# Agent profile: ${role}\n\n${instructions}\n`);
   else process.stdout.write(`${snippet}\n`);
 }
 

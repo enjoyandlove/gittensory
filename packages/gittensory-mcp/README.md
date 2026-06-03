@@ -41,6 +41,9 @@ gittensory-mcp cache clear
 gittensory-mcp init-client --print codex
 gittensory-mcp init-client --print claude
 gittensory-mcp init-client --print cursor
+gittensory-mcp init-client --print claude --agent-profile miner-planner
+gittensory-mcp init-client --print claude --agent-profile maintainer-triage
+gittensory-mcp init-client --print claude --agent-profile repo-owner-intake
 gittensory-mcp decision-pack --login jsonbored --json
 gittensory-mcp repo-decision --login jsonbored --repo we-promise/sure --json
 gittensory-mcp analyze-branch --login jsonbored --json
@@ -102,6 +105,28 @@ The same capabilities are exposed to MCP clients as:
 - `gittensory_agent_get_run`
 - `gittensory_agent_explain_next_action`
 - `gittensory_agent_prepare_pr_packet`
+
+## Custom Agent Profiles
+
+`init-client` can emit a pre-configured system prompt alongside the MCP snippet. Pass `--agent-profile` to select one of three built-in roles:
+
+| Profile | Intended user |
+|---|---|
+| `miner-planner` | Open-source contributor agents that identify and prepare work packets |
+| `maintainer-triage` | Maintainer agents that evaluate incoming contributions |
+| `repo-owner-intake` | Repo-owner agents that assess new contributors and prepare onboarding guidance |
+
+All profiles enforce the same human-approval boundary: the agent may plan, explain, draft, and prepare packets, but **cannot** autonomously open PRs, post comments, close issues, label, merge, or publish any public GitHub output.
+
+```sh
+# Print snippet + instructions for a miner-planner agent
+gittensory-mcp init-client --print claude --agent-profile miner-planner
+
+# Get JSON output with the instructions field
+gittensory-mcp init-client --print claude --agent-profile maintainer-triage --json
+```
+
+Copy the printed instructions into your agent's system prompt, `CLAUDE.md`, or `.cursorrules` file. The snippet and instructions are printed separately; neither file is modified by this command.
 
 ## Environment
 

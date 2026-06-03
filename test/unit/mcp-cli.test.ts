@@ -900,6 +900,44 @@ describe("gittensory-mcp CLI", () => {
   it("rejects unsupported client snippets", () => {
     expect(() => run(["init-client", "--print", "other"])).toThrow(/Unsupported client/);
   });
+
+  it("emits agent profile instructions for all three roles", () => {
+    const roles = ["miner-planner", "maintainer-triage", "repo-owner-intake"] as const;
+    for (const role of roles) {
+      const plain = run(["init-client", "--print", "claude", "--agent-profile", role]);
+      expect(plain).toContain('"mcpServers"');
+      expect(plain).toContain(`# Agent profile: ${role}`);
+      expect(plain).toMatch(/Permitted actions:/);
+      expect(plain).toMatch(/Prohibited actions:/);
+      expect(plain).toMatch(/may not|cannot.*autonomously/i);
+
+      const json = JSON.parse(run(["init-client", "--print", "claude", "--agent-profile", role, "--json"])) as {
+        client: string;
+        agentProfile: string;
+        instructions: string;
+        snippet: string;
+        notes: string[];
+      };
+      expect(json.client).toBe("claude");
+      expect(json.agentProfile).toBe(role);
+      expect(typeof json.instructions).toBe("string");
+      expect(json.instructions.length).toBeGreaterThan(100);
+      expect(json.snippet).toContain('"mcpServers"');
+      expect(json.notes).toEqual(expect.arrayContaining([expect.stringContaining("system prompt")]));
+
+      expect(json.instructions).not.toMatch(/wallet\s*[:=]\s*\S+|hotkey\s*[:=]\s*\S+|coldkey\s*[:=]\s*\S+/i);
+    }
+  });
+
+  it("rejects unknown agent profiles", () => {
+    expect(() => run(["init-client", "--print", "claude", "--agent-profile", "unknown-role"])).toThrow(/Unknown agent profile/);
+  });
+
+  it("omits agentProfile and instructions fields when no --agent-profile is passed", () => {
+    const json = JSON.parse(run(["init-client", "--print", "claude", "--json"])) as Record<string, unknown>;
+    expect(json).not.toHaveProperty("agentProfile");
+    expect(json).not.toHaveProperty("instructions");
+  });
 });
 
 function run(args: string[], env: Record<string, string> = {}) {
