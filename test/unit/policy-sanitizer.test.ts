@@ -1,65 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { __controlPanelRolesInternals } from "../../src/services/control-panel-roles";
-import {
-  compileFocusManifestPolicy,
-  deriveContributionLanes,
-  isFocusManifestPublicSafe,
-  parseFocusManifest,
-} from "../../src/signals/focus-manifest";
-
-const { sanitizeRoleText } = __controlPanelRolesInternals;
-
-const FORBIDDEN_POLICY_PATTERN =
-  /wallet|hotkey|coldkey|mnemonic|payout|reward estimate|raw trust|trust score|public score estimate|private reviewability|private scoreability|farming/i;
-
-// ---------------------------------------------------------------------------
-// sanitizeRoleText — path redaction
-// ---------------------------------------------------------------------------
-
-describe("sanitizeRoleText — path redaction", () => {
-  it("redacts Unix user paths", () => {
-    expect(sanitizeRoleText("/Users/alice/repo")).toBe("<redacted-path>");
-    expect(sanitizeRoleText("/home/bob/.ssh/key")).toBe("<redacted-path>");
-    expect(sanitizeRoleText("/tmp/workdir/secret")).toBe("<redacted-path>");
-  });
-
-  it("redacts Windows user paths", () => {
-    expect(sanitizeRoleText("C:\\Users\\Alice\\Desktop\\file.txt")).toBe("<redacted-path>");
-  });
-
-  it("replaces embedded paths inline, not the whole string", () => {
-    const result = sanitizeRoleText("see /home/alice/notes for context");
-    expect(result).toContain("<redacted-path>");
-    expect(result).not.toContain("/home/alice");
-  });
-
-  it("leaves safe paths unchanged", () => {
-    expect(sanitizeRoleText("src/signals/focus-manifest.ts")).toBe("src/signals/focus-manifest.ts");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// sanitizeRoleText — token redaction
-// ---------------------------------------------------------------------------
-
-describe("sanitizeRoleText — token redaction", () => {
-  it("redacts GitHub personal access tokens", () => {
-    expect(sanitizeRoleText("token: ghp_abcdefghijklmno")).toContain("<redacted-token>");
-    expect(sanitizeRoleText("token: github_pat_abcdefghij1234567890")).toContain("<redacted-token>");
-  });
-
-  it("redacts gts_ and glpat- tokens", () => {
-    expect(sanitizeRoleText("gts_abcdefghijklmno")).toContain("<redacted-token>");
-    expect(sanitizeRoleText("glpat-abcdefghijklmno")).toContain("<redacted-token>");
-  });
-
-  it("redacts Bearer authorization headers", () => {
-    const result = sanitizeRoleText("Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9");
-    expect(result).toContain("<redacted-token>");
-    expect(result).not.toMatch(/eyJhbGci/);
-  });
-
-  it("leaves short token-like strings that are too short to redact", () => {
 import { __controlPanelRolesInternals, buildControlPanelRoleSummary } from "../../src/services/control-panel-roles";
 import {
   buildCollisionReport,
@@ -72,9 +11,18 @@ import {
 } from "../../src/signals/engine";
 import { buildGittensorConfigRecommendation, buildRegistrationReadiness, type InstallationHealthSummary as ReadinessInstallHealth } from "../../src/signals/registration-readiness";
 import { buildRepoSettingsPreview, decidePublicSurface, type InstallationHealthSummary as PreviewInstallHealth } from "../../src/signals/settings-preview";
+import {
+  compileFocusManifestPolicy,
+  deriveContributionLanes,
+  isFocusManifestPublicSafe,
+  parseFocusManifest,
+} from "../../src/signals/focus-manifest";
 import type { InstallationRecord, IssueRecord, PullRequestRecord, RepoLabelRecord, RegistryRepoConfig, RepositoryRecord, RepositorySettings } from "../../src/types";
 
 const { sanitizeRoleText } = __controlPanelRolesInternals;
+
+const FORBIDDEN_POLICY_PATTERN =
+  /wallet|hotkey|coldkey|mnemonic|payout|reward estimate|raw trust|trust score|public score estimate|private reviewability|private scoreability|farming/i;
 
 const PRIVATE_TERMS_PATTERN =
   /wallet|hotkey|coldkey|raw trust|trust score|payout|reward estimate|farming|private reviewability|public score estimate|seed phrase|mnemonic|private key/i;
@@ -212,7 +160,6 @@ describe("sanitizeRoleText token redaction", () => {
 // sanitizeRoleText — private term redaction
 // ---------------------------------------------------------------------------
 
-describe("sanitizeRoleText — private term redaction", () => {
 // ─── sanitizeRoleText: private term redaction ─────────────────────────────────
 
 describe("sanitizeRoleText private term redaction", () => {
@@ -451,10 +398,7 @@ describe("compileFocusManifestPolicy — public-safe output boundaries", () => {
       expect(isFocusManifestPublicSafe(term)).toBe(false);
     }
     expect(isFocusManifestPublicSafe("Keep PRs focused and narrow.")).toBe(true);
-      expect(sanitizeRoleText(`This action involves your ${term} settings.`)).toBe("<redacted>");
-      expect(sanitizeRoleText(term.toUpperCase())).toBe("<redacted>");
-    });
-  }
+  });
 
   it("path regex consumes path-embedded private terms before the term check fires", () => {
     // The path regex eats the entire /Users/alice/wallet-configs string, so the
