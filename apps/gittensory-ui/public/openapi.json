@@ -13544,6 +13544,36 @@
           }
         ]
       }
+    },
+    "/v1/app/repos/{owner}/{repo}/settings": {
+      "post": {
+        "responses": {
+          "200": {
+            "description": "Updated repository automation settings (requires maintainer, owner, or operator role with repo access)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RepositorySettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid repository settings"
+          },
+          "403": {
+            "description": "Insufficient role or repo access"
+          }
+        },
+        "security": [
+          {
+            "GittensoryBearer": []
+          },
+          {
+            "GittensorySessionCookie": []
+          }
+        ]
+      }
     }
   },
   "servers": [

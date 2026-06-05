@@ -1416,6 +1416,52 @@ export function createApp() {
     return c.json(await getRepositorySettings(c.env, fullName));
   });
 
+  app.post("/v1/app/repos/:owner/:repo/settings", async (c) => {
+    const forbidden = await requireAppRole(c, ["maintainer", "owner", "operator"]);
+    if (forbidden) return forbidden;
+    const fullName = `${c.req.param("owner")}/${c.req.param("repo")}`;
+    const identity = await authenticateRequestIdentity(c);
+    const repo = await getRepository(c.env, fullName);
+    if (identity?.kind === "session") {
+      const repoForbidden = await requireSessionRepoAccess(c, identity, fullName, repo);
+      if (repoForbidden) return repoForbidden;
+    }
+    const body = (await c.req.json().catch(() => null)) ?? {};
+    const parsed = repositorySettingsSchema.safeParse(body);
+    if (!parsed.success) return c.json({ error: "invalid_repository_settings", issues: parsed.error.issues }, 400);
+    const updated = await upsertRepositorySettings(c.env, {
+      repoFullName: fullName,
+      commentMode: parsed.data.commentMode,
+      publicSignalLevel: parsed.data.publicSignalLevel,
+      checkRunMode: parsed.data.checkRunMode,
+      checkRunDetailLevel: parsed.data.checkRunDetailLevel,
+      autoLabelEnabled: parsed.data.autoLabelEnabled,
+      gittensorLabel: parsed.data.gittensorLabel,
+      createMissingLabel: parsed.data.createMissingLabel,
+      publicSurface: parsed.data.publicSurface,
+      includeMaintainerAuthors: parsed.data.includeMaintainerAuthors,
+      requireLinkedIssue: parsed.data.requireLinkedIssue,
+      backfillEnabled: parsed.data.backfillEnabled,
+      privateTrustEnabled: parsed.data.privateTrustEnabled,
+    });
+    await recordAuditEvent(c.env, {
+      eventType: "settings.updated",
+      actor: identity?.actor ?? null,
+      route: c.req.path,
+      targetKey: fullName,
+      outcome: "success",
+      detail: `Maintainer updated settings for ${fullName}`,
+      metadata: {
+        publicSurface: parsed.data.publicSurface,
+        checkRunMode: parsed.data.checkRunMode,
+        autoLabelEnabled: parsed.data.autoLabelEnabled,
+        includeMaintainerAuthors: parsed.data.includeMaintainerAuthors,
+        requireLinkedIssue: parsed.data.requireLinkedIssue,
+      },
+    }).catch(() => undefined);
+    return c.json(updated);
+  });
+
   app.post("/v1/repos/:owner/:repo/settings-preview", async (c) => {
     const fullName = `${c.req.param("owner")}/${c.req.param("repo")}`;
     const body = (await c.req.json().catch(() => null)) ?? {};

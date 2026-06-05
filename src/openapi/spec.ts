@@ -380,6 +380,15 @@ export function buildOpenApiSpec() {
   });
   registry.registerPath({
     method: "post",
+    path: "/v1/app/repos/{owner}/{repo}/settings",
+    responses: {
+      200: { description: "Updated repository automation settings (requires maintainer, owner, or operator role with repo access)", content: { "application/json": { schema: RepositorySettingsSchema } } },
+      400: { description: "Invalid repository settings" },
+      403: { description: "Insufficient role or repo access" },
+    },
+  });
+  registry.registerPath({
+    method: "post",
     path: "/v1/repos/{owner}/{repo}/settings-preview",
     responses: {
       200: { description: "Maintainer dry-run preview of the public surface decision for a sample PR (no GitHub mutation)", content: { "application/json": { schema: RepoSettingsPreviewSchema } } },
