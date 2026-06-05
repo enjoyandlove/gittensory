@@ -22,6 +22,7 @@ import {
   type AuthIdentity,
 } from "../auth/security";
 import { normalizeGittBountySnapshot } from "../bounties/ingest";
+import { DEFAULT_COMMAND_AUTHORIZATION_POLICY, normalizeCommandAuthorizationPolicy } from "../settings/command-authorization";
 import {
   countOpenIssues,
   countOpenPullRequests,
@@ -37,6 +38,7 @@ import {
   getLatestScoringModelSnapshot,
   getPullRequest,
   getRepository,
+  getRepoQueueTrendSnapshot,
   getRepositorySettings,
   recordAuditEvent,
   getContributorEvidence,
@@ -59,6 +61,7 @@ import {
   listDigestSubscriptionsForLogin,
   listProductUsageDailyRollups,
   listOpenPullRequests,
+  listPrVisibilitySkipAuditEvents,
   listPullRequestFiles,
   listPullRequestReviews,
   listRecentMergedPullRequests,
@@ -146,6 +149,7 @@ import {
 } from "../services/weekly-value-report";
 import { loadOrComputeIssueQualityResponse } from "../services/issue-quality";
 import { loadOrComputeBurdenForecastResponse } from "../services/burden-forecast";
+import { buildUnavailableQueueTrendReport } from "../services/queue-trends";
 import { loadOrComputeRepoOutcomePatternsResponse } from "../services/repo-outcome-patterns";
 import {
   buildBountyAdvisory,
@@ -177,7 +181,8 @@ import { buildPullRequestReviewability, type PullRequestReviewability } from "..
 import { buildLocalBranchAnalysis, findCurrentBranchPullRequest } from "../signals/local-branch";
 import { MAX_LOCAL_SCORER_WARNING_CHARS, MAX_LOCAL_SCORER_WARNING_COUNT } from "../signals/local-scorer-diagnostics";
 import { loadRepoFocusManifest } from "../signals/focus-manifest-loader";
-import { buildRepoSettingsPreview } from "../signals/settings-preview";
+import { buildRepoOnboardingPackPreviewForRepo } from "../services/repo-onboarding-pack";
+import { buildRepoSettingsPreview, type PublicSurfaceSkipReason } from "../signals/settings-preview";
 import { buildGittensorConfigRecommendation, buildRegistrationReadiness, type InstallationHealthSummary } from "../signals/registration-readiness";
 import { fileUpstreamDriftIssues, loadUpstreamStatus, refreshUpstreamDrift, registryHyperparameterDriftWarningsForRepo } from "../upstream/ruleset";
 import type {
@@ -238,6 +243,14 @@ async function recordRouteProductUsage(
 
 const MAX_LOCAL_BRANCH_REF_CHARS = 256;
 const MAX_LOCAL_BRANCH_TEXT_CHARS = 4000;
+const PR_VISIBILITY_SKIP_REASONS = [
+  "surface_off",
+  "missing_author",
+  "bot_author",
+  "maintainer_author",
+  "miner_detection_unavailable",
+  "not_official_gittensor_miner",
+] as const satisfies readonly PublicSurfaceSkipReason[];
 
 const preflightSchema = z.object({
   repoFullName: z.string().min(3),
@@ -256,6 +269,15 @@ const localDiffPreflightSchema = preflightSchema.extend({
   testFiles: z.array(z.string()).optional(),
   commitMessage: z.string().optional(),
 });
+
+const skippedPrAuditQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().optional(),
+    repoFullName: z.string().trim().min(3).max(200).optional(),
+    reason: z.enum(PR_VISIBILITY_SKIP_REASONS).optional(),
+    since: z.string().trim().min(1).max(64).optional(),
+  })
+  .strict();
 
 const localBranchChangedFileSchema = z
   .object({
@@ -403,9 +425,11 @@ const agentExplainBlockersSchema = z.union([localBranchAnalysisSchema, agentPlan
 
 const repositorySettingsSchema = z.object({
   commentMode: z.enum(["off", "detected_contributors_only", "all_prs"]).default("detected_contributors_only"),
+  publicAudienceMode: z.enum(["oss_maintainer", "gittensor_only"]).default("oss_maintainer"),
   publicSignalLevel: z.enum(["minimal", "standard"]).default("standard"),
   checkRunMode: z.enum(["off", "enabled"]).default("off"),
   checkRunDetailLevel: z.enum(["minimal", "standard", "deep"]).default("standard"),
+  gateCheckMode: z.enum(["off", "enabled"]).default("off"),
   autoLabelEnabled: z.boolean().default(true),
   gittensorLabel: z.string().trim().min(1).max(50).default("gittensor"),
   createMissingLabel: z.boolean().default(true),
@@ -414,6 +438,12 @@ const repositorySettingsSchema = z.object({
   requireLinkedIssue: z.boolean().default(false),
   backfillEnabled: z.boolean().default(true),
   privateTrustEnabled: z.boolean().default(true),
+  commandAuthorization: z
+    .object({
+      default: z.array(z.enum(["maintainer", "collaborator", "pr_author", "confirmed_miner"])).max(4).optional(),
+      commands: z.record(z.string().trim().min(1).max(64), z.array(z.enum(["maintainer", "collaborator", "pr_author", "confirmed_miner"])).max(4)).optional(),
+    })
+    .default(DEFAULT_COMMAND_AUTHORIZATION_POLICY),
 });
 
 const settingsPreviewSchema = z.object({
@@ -427,6 +457,9 @@ const settingsPreviewSchema = z.object({
       body: z.string().max(10000).nullable().optional(),
       labels: z.array(z.string().max(100)).max(50).optional(),
       linkedIssues: z.array(z.number().int().positive()).max(50).optional(),
+      commandName: z.string().trim().min(1).max(64).optional(),
+      commenterLogin: z.string().trim().min(1).max(100).optional(),
+      commenterAssociation: z.enum(["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN", "NONE"]).optional(),
     })
     .optional(),
 });
@@ -796,11 +829,12 @@ export function createApp() {
     const summary = await getRoleSummaryForIdentity(c.env, identity);
     if (!summary.roles.some((role) => ["maintainer", "owner", "operator"].includes(role))) return c.json({ error: "insufficient_role" }, 403);
 
-    const [allRepositories, allInstallations, allHealth, allRateLimits] = await Promise.all([
+    const [allRepositories, allInstallations, allHealth, allRateLimits, allSyncStates] = await Promise.all([
       listRepositories(c.env),
       listInstallations(c.env),
       listInstallationHealth(c.env),
       listLatestGitHubRateLimitObservations(c.env, 20),
+      listRepoSyncStates(c.env),
     ]);
     const scope = identity.kind === "session" && !summary.roles.includes("operator") ? await loadControlPanelAccessScope(c.env, identity.actor) : null;
     const scopedRepoNames = new Set(scope?.repositoryFullNames.map((repo) => repo.toLowerCase()) ?? []);
@@ -814,6 +848,13 @@ export function createApp() {
       ? allHealth.filter((record) => scopedInstallationIds.has(record.installationId) || scopedAccountLogins.has(record.accountLogin.toLowerCase()))
       : allHealth;
     const rateLimits = scope ? allRateLimits.filter((record) => record.repoFullName !== undefined && record.repoFullName !== null && scopedRepoNames.has(record.repoFullName.toLowerCase())) : allRateLimits;
+    // Cached open-PR count is summed across ALL in-scope repos from sync state (a single query) so the
+    // headline metric is a true global count like its siblings. The per-repo PR fetch below is capped at
+    // 12 only to bound the `reviewability` preview list, not the metric.
+    const scopedRepoNameSet = new Set(repositories.map((repo) => repo.fullName.toLowerCase()));
+    const scopedSyncStates = allSyncStates.filter((state) => scopedRepoNameSet.has(state.repoFullName.toLowerCase()));
+    const totalOpenPullRequestsCached = scopedSyncStates.reduce((sum, state) => sum + Math.max(0, state.openPullRequestsCount), 0);
+    const reposWithOpenPullRequests = scopedSyncStates.filter((state) => state.openPullRequestsCount > 0).length;
     const openPullRequests = (
       await Promise.all(repositories.slice(0, 12).map((repo) => listOpenPullRequests(c.env, repo.fullName).then((rows) => rows.map((pull) => ({ repoFullName: repo.fullName, pull })))))
     ).flat();
@@ -823,7 +864,7 @@ export function createApp() {
       health: health.map(enrichInstallationHealth),
       metrics: [
         { label: "Installations", value: installations.length, spark: sparklineFromCounts(installations.length, Math.max(installations.length, 1)) },
-        { label: "Open PRs cached", value: openPullRequests.length, spark: sparklineFromCounts(openPullRequests.length, Math.max(repositories.length, 1)) },
+        { label: "Open PRs cached", value: totalOpenPullRequestsCached, spark: sparklineFromCounts(reposWithOpenPullRequests, Math.max(repositories.length, 1)) },
         { label: "Install issues", value: health.filter((record) => record.status !== "healthy").length, spark: sparklineFromCounts(health.filter((record) => record.status === "healthy").length, Math.max(health.length, 1)) },
         { label: "Rate-limit events", value: rateLimits.length, spark: sparklineFromCounts(rateLimits.filter((record) => (record.remaining ?? 0) > 0).length, Math.max(rateLimits.length, 1)) },
       ],
@@ -835,6 +876,44 @@ export function createApp() {
         reason: pull.linkedIssues.length > 0 ? `linked issue #${pull.linkedIssues[0]}` : "cached open PR without linked issue",
       })),
       settingsPreview: buildMaintainerSettingsPreview(),
+    });
+  });
+
+  app.get("/v1/app/skipped-pr-audit", async (c) => {
+    const identity = await authenticateRequestIdentity(c);
+    if (!identity) return c.json({ error: "unauthorized" }, 401);
+    const summary = await getRoleSummaryForIdentity(c.env, identity);
+    if (!summary.roles.some((role) => ["maintainer", "owner", "operator"].includes(role))) return c.json({ error: "insufficient_role" }, 403);
+
+    const parsed = skippedPrAuditQuerySchema.safeParse(c.req.query());
+    if (!parsed.success) return c.json({ error: "invalid_skipped_pr_audit_query", issues: parsed.error.issues }, 400);
+    const sinceIso = parsed.data.since ? toIsoQueryDate(parsed.data.since) : undefined;
+    if (parsed.data.since && !sinceIso) return c.json({ error: "invalid_since" }, 400);
+    const requestedRepo = parsed.data.repoFullName;
+    const repoFullNames = await skippedPrAuditRepoScope(c, identity, summary.roles, requestedRepo);
+    if (repoFullNames instanceof Response) return repoFullNames;
+    const page = await listPrVisibilitySkipAuditEvents(c.env, {
+      limit: clampInteger(parsed.data.limit ?? 50, 1, 100),
+      repoFullNames,
+      reason: parsed.data.reason,
+      sinceIso,
+    });
+    return c.json({
+      generatedAt: nowIso(),
+      limit: page.limit,
+      hasMore: page.hasMore,
+      filters: {
+        repoFullName: requestedRepo ?? null,
+        reason: parsed.data.reason ?? null,
+        since: sinceIso ?? null,
+      },
+      items: page.items.map((item) => ({
+        repoFullName: item.repoFullName,
+        pullNumber: item.pullNumber,
+        reason: item.reason,
+        timestamp: item.createdAt,
+        remediation: skippedPrAuditRemediation(item.reason),
+      })),
     });
   });
 
@@ -1409,6 +1488,19 @@ export function createApp() {
   app.get("/v1/repos/:owner/:repo/gittensor-config-recommendation", async (c) => {
     const fullName = `${c.req.param("owner")}/${c.req.param("repo")}`;
     return c.json(await buildGittensorConfigRecommendationResponse(c.env, fullName));
+  });
+
+  app.get("/v1/repos/:owner/:repo/onboarding-pack/preview", async (c) => {
+    const fullName = `${c.req.param("owner")}/${c.req.param("repo")}`;
+    const forbidden = await requireAppRole(c, ["maintainer", "owner", "operator"]);
+    if (forbidden) return forbidden;
+    const response = await buildRepoOnboardingPackPreviewForRepo(c.env, fullName, {
+      refreshManifest: c.req.query("refresh") === "true",
+    });
+    if ("error" in response) {
+      return c.json(response, 404);
+    }
+    return c.json(response);
   });
 
   app.get("/v1/repos/:owner/:repo/settings", async (c) => {
@@ -2126,9 +2218,11 @@ export function createApp() {
       await upsertRepositorySettings(c.env, {
         repoFullName: fullName,
         commentMode: parsed.data.commentMode,
+        publicAudienceMode: parsed.data.publicAudienceMode,
         publicSignalLevel: parsed.data.publicSignalLevel,
         checkRunMode: parsed.data.checkRunMode,
         checkRunDetailLevel: parsed.data.checkRunDetailLevel,
+        gateCheckMode: parsed.data.gateCheckMode,
         autoLabelEnabled: parsed.data.autoLabelEnabled,
         gittensorLabel: parsed.data.gittensorLabel,
         createMissingLabel: parsed.data.createMissingLabel,
@@ -2137,6 +2231,7 @@ export function createApp() {
         requireLinkedIssue: parsed.data.requireLinkedIssue,
         backfillEnabled: parsed.data.backfillEnabled,
         privateTrustEnabled: parsed.data.privateTrustEnabled,
+        commandAuthorization: normalizeCommandAuthorizationPolicy(parsed.data.commandAuthorization).policy,
       }),
     );
   });
@@ -2401,8 +2496,8 @@ function buildCommandPreview(
     };
   }
 
-  if (missingPermissions.includes("issues")) {
-    const summary = "GitHub App permission Issues: write is required before a command response can be posted.";
+  if (missingPermissions.includes("issues") || missingPermissions.includes("pull_requests")) {
+    const summary = "GitHub App permissions Issues: write and Pull requests: write are required before a command response can be posted.";
     const body = sanitizePublicComment(`Gittensory preview is ready for ${target}, but ${summary}`);
     return {
       ...base,
@@ -2556,6 +2651,7 @@ function commandPreviewMissingPermissions(request: z.infer<typeof commandPreview
   const configured = new Set([...(installation?.missingPermissions ?? []), ...(request.sample?.missingPermissions ?? [])]);
   const permissions = request.sample?.permissions ?? installation?.permissions;
   if (permissions && permissions.issues !== "write") configured.add("issues");
+  if (permissions && permissions.pull_requests !== "write") configured.add("pull_requests");
   return [...configured].sort();
 }
 
@@ -2571,6 +2667,8 @@ function commandPreviewPermissionWarnings(missingPermissions: string[]) {
       message:
         permission === "issues"
           ? "Command responses require GitHub App permission Issues: write; preview will not post while it is missing."
+          : permission === "pull_requests"
+            ? "Command responses require GitHub App permission Pull requests: write; preview will not post while it is missing."
           : `GitHub App permission ${permission}: ${requiredAccess} is missing for this preview scenario.`,
     };
   });
@@ -2687,7 +2785,7 @@ function buildDigestItems(args: {
 
 async function buildRepoIntelligenceResponse(env: Env, fullName: string) {
   let burdenForecastError: unknown;
-  const [repo, snapshots, dataQuality, burdenForecast] = await Promise.all([
+  const [repo, snapshots, dataQuality, burdenForecast, queueTrends] = await Promise.all([
     getRepository(env, fullName),
     Promise.all(
       ["queue-health", "config-quality", "label-audit", "maintainer-lane", "maintainer-cut-readiness", "contributor-intake-health"].map(async (signalType) => [
@@ -2700,6 +2798,7 @@ async function buildRepoIntelligenceResponse(env: Env, fullName: string) {
       burdenForecastError = error;
       return null;
     }),
+    getRepoQueueTrendSnapshot(env, fullName),
   ]);
   const intelligenceDataQuality = burdenForecastError
     ? withDataQualityWarning(dataQuality, `Burden forecast unavailable for ${fullName}: ${errorMessage(burdenForecastError)}`)
@@ -2716,6 +2815,7 @@ async function buildRepoIntelligenceResponse(env: Env, fullName: string) {
         },
       }
     : {};
+  const queueTrendReport = queueTrends?.payload ?? (buildUnavailableQueueTrendReport(fullName) as unknown as Record<string, never>);
   if (snapshotMap["queue-health"] && snapshotMap["config-quality"] && snapshotMap["label-audit"]) {
     return {
       status: "ready",
@@ -2725,6 +2825,7 @@ async function buildRepoIntelligenceResponse(env: Env, fullName: string) {
       repo,
       lane: buildLaneAdvice(repo, fullName),
       queueHealth: snapshotMap["queue-health"],
+      queueTrends: queueTrendReport,
       configQuality: snapshotMap["config-quality"],
       labelAudit: snapshotMap["label-audit"],
       maintainerLane: snapshotMap["maintainer-lane"],
@@ -2756,6 +2857,7 @@ async function buildRepoIntelligenceResponse(env: Env, fullName: string) {
     repo,
     lane: buildLaneAdvice(repo, fullName),
     queueHealth,
+    queueTrends: queueTrendReport,
     collisions,
     configQuality,
     labelAudit,
@@ -3382,6 +3484,45 @@ async function requireSessionRepoAccess(
   if (scopedRepoNames.has(requestedRepo)) return null;
   if (repo && scope.accountLogins.some((login) => login.toLowerCase() === repo.owner.toLowerCase())) return null;
   return c.json({ error: "forbidden_repo" }, 403);
+}
+
+async function skippedPrAuditRepoScope(
+  c: ProtectedRouteContext,
+  identity: AuthIdentity,
+  roles: ControlPanelRoleName[],
+  requestedRepo: string | undefined,
+): Promise<string[] | undefined | Response> {
+  if (identity.kind !== "session" || roles.includes("operator")) return requestedRepo ? [requestedRepo] : undefined;
+  const scope = await loadControlPanelAccessScope(c.env, identity.actor);
+  const scopedRepoNames = new Set(scope.repositoryFullNames.map((name) => name.toLowerCase()));
+  if (requestedRepo) {
+    return scopedRepoNames.has(requestedRepo.toLowerCase()) ? [requestedRepo] : c.json({ error: "forbidden_repo" }, 403);
+  }
+  return scope.repositoryFullNames;
+}
+
+function skippedPrAuditRemediation(reason: string): string {
+  switch (reason) {
+    case "surface_off":
+      return "Enable a PR public surface or check runs in repository settings if maintainers want Gittensory to post.";
+    case "missing_author":
+      return "Retry after GitHub provides a resolvable pull request author.";
+    case "bot_author":
+      return "No action needed; bot-authored pull requests are intentionally kept quiet.";
+    case "maintainer_author":
+      return "Enable maintainer-authored PRs in repository settings only if those PRs should receive public GitHub App output.";
+    case "miner_detection_unavailable":
+      return "Retry after official Gittensor miner detection recovers; Gittensory skips instead of guessing.";
+    case "not_official_gittensor_miner":
+      return "No public action is needed unless the author should be recognized as an official Gittensor miner.";
+    default:
+      return "Review repository settings and installation health before reprocessing the pull request.";
+  }
+}
+
+function toIsoQueryDate(value: string): string | undefined {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined;
 }
 
 function requiresApiToken(path: string): boolean {

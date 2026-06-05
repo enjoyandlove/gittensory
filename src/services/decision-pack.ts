@@ -23,7 +23,7 @@ import {
 } from "../db/repositories";
 import { contributorRepoStatsFromGittensor, fetchGittensorContributorSnapshot } from "../gittensor/api";
 import { fetchPublicContributorProfile } from "../github/public";
-import { getOrCreateScoringModelSnapshot } from "../scoring/model";
+import { DEFAULT_SCORING_CONSTANTS, getOrCreateScoringModelSnapshot } from "../scoring/model";
 import {
   buildContributorFit,
   buildContributorOutcomeHistory,
@@ -70,6 +70,12 @@ import { nowIso } from "../utils/json";
 
 export const CONTRIBUTOR_DECISION_PACK_SIGNAL = "contributor-decision-pack";
 export const DECISION_PACK_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_OSS_EMISSION_SHARE = DEFAULT_SCORING_CONSTANTS.OSS_EMISSION_SHARE ?? 0.9;
+
+function resolveOssEmissionShare(constants: Record<string, number> | undefined): number {
+  const value = constants?.OSS_EMISSION_SHARE;
+  return typeof value === "number" && Number.isFinite(value) ? value : DEFAULT_OSS_EMISSION_SHARE;
+}
 export const DECISION_PACK_REBUILD_DEBOUNCE_MS = 15 * 1000;
 const pendingDecisionPackRebuilds = new Map<string, Promise<boolean>>();
 
@@ -77,6 +83,17 @@ export type DecisionRecommendation = "pursue" | "cleanup_first" | "maintainer_la
 export type DecisionActionKind = "cleanup_existing_prs" | "land_existing_prs" | "open_new_direct_pr" | "file_issue_discovery" | "maintainer_lane_improve_repo" | "maintainer_cut_readiness";
 export type DecisionPackFreshness = "fresh" | "stale" | "rebuilding" | "missing";
 export type ActionPortfolioBucketName = "cleanup" | "wait" | "direct_pr" | "issue_discovery" | "avoid" | "maintainer_lane";
+export type CounterfactualAlternativeKind = "wait" | "close" | "replace" | "cleanup_first" | "choose_another_issue" | "open_direct_pr" | "file_issue_discovery";
+
+export type CounterfactualReason = {
+  alternative: CounterfactualAlternativeKind;
+  group: ActionPortfolioBucketName | "close" | "replace" | "choose_another_issue";
+  rank: number;
+  reason: string;
+  facts: string[];
+  assumptions: string[];
+  publicSummary: string;
+};
 
 export type ContributorDecisionPack = {
   status: "ready";
@@ -185,6 +202,7 @@ export type RepoDecision = {
   issueQuality?: IssueQualitySummary | undefined;
   manifestSummary?: RepoDecisionManifestSummary | undefined;
   tradeoffSummary?: RepoDecisionTradeoffSummary | undefined;
+  counterfactualReasons?: CounterfactualReason[] | undefined;
 };
 
 export type RepoDecisionManifestSummary = {
@@ -228,6 +246,7 @@ export type DecisionAction = {
   whyThisHelps: string[];
   nextActions: string[];
   publicNextActions: string[];
+  counterfactualReasons?: CounterfactualReason[] | undefined;
 };
 
 export type ActionPortfolioScenarioProjection = {
@@ -456,6 +475,7 @@ export async function buildAndPersistContributorDecisionPack(env: Env, login: st
     totals,
     opportunities: fit.opportunities,
     scoringModelSnapshotId: scoringSnapshot.id,
+    ossEmissionShare: resolveOssEmissionShare(scoringSnapshot.constants),
     contributorPullRequests,
     contributorIssues,
     repoStats,
@@ -533,6 +553,7 @@ function buildContributorDecisionPack(args: {
   focusManifests?: Map<string, FocusManifest> | undefined;
   repoOutcomePatternsByRepo?: Map<string, RepoOutcomePatterns> | undefined;
   recommendationOutcomeFeedback?: AgentRecommendationOutcomeSummary | undefined;
+  ossEmissionShare?: number | undefined;
 }): ContributorDecisionPack {
   const recommendationOutcomeFeedback = args.recommendationOutcomeFeedback ?? emptyRecommendationOutcomeFeedback(args.login);
   const registeredRepositories = args.repositories.filter((repo) => repo.isRegistered);
@@ -571,6 +592,7 @@ function buildContributorDecisionPack(args: {
         focusManifest: args.focusManifests?.get(key),
         repoOutcomePatterns: args.repoOutcomePatternsByRepo?.get(key),
         recommendationOutcomeFeedback: recommendationFeedbackByRepo.get(key),
+        ossEmissionShare: args.ossEmissionShare,
       });
     })
     .sort((left, right) => right.priorityScore - left.priorityScore || left.repoFullName.localeCompare(right.repoFullName));
@@ -652,9 +674,12 @@ function buildRepoDecision(args: {
   focusManifest?: FocusManifest | undefined;
   repoOutcomePatterns?: RepoOutcomePatterns | undefined;
   recommendationOutcomeFeedback?: AgentRecommendationOutcomeRepoSummary | undefined;
+  ossEmissionShare?: number | undefined;
 }): RepoDecision {
   const lane = buildLaneAdvice(args.repo, args.repo.fullName);
   const config = args.repo.registryConfig;
+  const ossEmissionShare =
+    typeof args.ossEmissionShare === "number" && Number.isFinite(args.ossEmissionShare) ? args.ossEmissionShare : DEFAULT_OSS_EMISSION_SHARE;
   const openPullRequests = args.totals?.openPullRequestsTotal ?? args.syncState?.openPullRequestsCount ?? 0;
   const openIssues = args.totals?.openIssuesTotal ?? args.syncState?.openIssuesCount ?? 0;
   const queue = {
@@ -663,10 +688,14 @@ function buildRepoDecision(args: {
     mergedPullRequests: args.totals?.mergedPullRequestsTotal ?? args.syncState?.recentMergedPullRequestsCount ?? 0,
     closedUnmergedPullRequests: args.totals?.closedUnmergedPullRequestsTotal ?? 0,
   };
+  const baseEmissionShare = config?.emissionShare ?? 0;
+  // Lane shares are a split of the OSS *mining* pool (emissionShare * OSS_EMISSION_SHARE), matching
+  // preview.ts laneMath (directPrSlice/issueDiscoverySlice) and reward-risk.ts. The raw emissionShare
+  // field stays raw (it mirrors laneMath.repoEmissionShare).
   const rewardUpside = {
-    emissionShare: round(config?.emissionShare ?? 0),
-    directPrShare: round((config?.emissionShare ?? 0) * (1 - (config?.issueDiscoveryShare ?? 0))),
-    issueDiscoveryShare: round((config?.emissionShare ?? 0) * (config?.issueDiscoveryShare ?? 0)),
+    emissionShare: round(baseEmissionShare),
+    directPrShare: round(baseEmissionShare * ossEmissionShare * (1 - (config?.issueDiscoveryShare ?? 0))),
+    issueDiscoveryShare: round(baseEmissionShare * ossEmissionShare * (config?.issueDiscoveryShare ?? 0)),
     maintainerCut: round(config?.maintainerCut ?? 0),
   };
   const blockers = scoreBlockersFor(args.repo.fullName, lane.lane, args.roleContext, args.outcome);
@@ -720,6 +749,20 @@ function buildRepoDecision(args: {
     manifestSummary,
     blockers,
   });
+  const finalRiskReasons = [...new Set([...riskReasons, ...manifestReasons.riskReasons, ...outcomeRiskLines, ...recommendationFeedbackRiskLines])];
+  const finalWhyThisHelps = [...new Set([...whyThisHelpsFor(recommendation, copyContext), ...manifestReasons.whyThisHelps, ...outcomeSuccessLines, ...recommendationFeedbackSuccessLines])];
+  const finalNextActions = [...new Set([...nextActionsFor(recommendation, copyContext), ...manifestReasons.nextActions])];
+  const finalPublicNextActions = [...new Set([...publicNextActionsFor(recommendation, copyContext), ...manifestReasons.publicNextActions])];
+  const counterfactualReasons = buildRepoDecisionCounterfactualReasons({
+    repoFullName: args.repo.fullName,
+    recommendation,
+    lane: lane.lane,
+    queue,
+    roleContext: args.roleContext,
+    outcome: args.outcome,
+    issueQuality,
+    blockers,
+  });
   return {
     repoFullName: args.repo.fullName,
     recommendation,
@@ -734,13 +777,14 @@ function buildRepoDecision(args: {
     scoreBlockers: blockers,
     repoOutcomePatterns,
     recommendationOutcomeFeedback: recommendationFeedback,
-    riskReasons: [...new Set([...riskReasons, ...manifestReasons.riskReasons, ...outcomeRiskLines, ...recommendationFeedbackRiskLines])],
-    whyThisHelps: [...new Set([...whyThisHelpsFor(recommendation, copyContext), ...manifestReasons.whyThisHelps, ...outcomeSuccessLines, ...recommendationFeedbackSuccessLines])],
-    nextActions: [...new Set([...nextActionsFor(recommendation, copyContext), ...manifestReasons.nextActions])],
-    publicNextActions: [...new Set([...publicNextActionsFor(recommendation, copyContext), ...manifestReasons.publicNextActions])],
+    riskReasons: finalRiskReasons,
+    whyThisHelps: finalWhyThisHelps,
+    nextActions: finalNextActions,
+    publicNextActions: finalPublicNextActions,
     issueQuality,
     manifestSummary,
     tradeoffSummary,
+    counterfactualReasons,
   };
 }
 
@@ -1105,6 +1149,7 @@ function action(kind: DecisionActionKind, decision: RepoDecision, priorityScore:
     whyThisHelps: decision.whyThisHelps,
     nextActions: decision.nextActions,
     publicNextActions: decision.publicNextActions,
+    counterfactualReasons: decision.counterfactualReasons,
   };
 }
 
@@ -1347,6 +1392,192 @@ function sanitizeTradeoffPublicText(value: string): string {
     .trim();
 }
 
+type CounterfactualReasonDraft = Omit<CounterfactualReason, "rank">;
+
+function buildRepoDecisionCounterfactualReasons(args: {
+  repoFullName: string;
+  recommendation: DecisionRecommendation;
+  lane: string;
+  queue: RepoDecision["queue"];
+  roleContext: RoleContext;
+  outcome: ContributorOutcomeHistory["repoOutcomes"][number] | undefined;
+  issueQuality: IssueQualitySummary | undefined;
+  blockers: ScoreBlocker[];
+}): CounterfactualReason[] {
+  const drafts: CounterfactualReasonDraft[] = [];
+  const baseFacts = counterfactualBaseFacts(args);
+  const baseAssumptions = counterfactualBaseAssumptions(args);
+  const add = (draft: Omit<CounterfactualReasonDraft, "facts" | "assumptions">, facts: string[] = [], assumptions: string[] = []) => {
+    drafts.push(counterfactualReason(draft, [...baseFacts, ...facts], [...baseAssumptions, ...assumptions]));
+  };
+
+  if (args.recommendation === "cleanup_first") {
+    add({
+      alternative: "wait",
+      group: "wait",
+      reason: "Passive waiting was rejected because visible cleanup work can reduce queue pressure sooner.",
+      publicSummary: `${args.repoFullName}: active cleanup is preferred over passive waiting while open-work pressure is visible.`,
+    });
+    add(
+      {
+        alternative: "choose_another_issue",
+        group: "choose_another_issue",
+        reason: "Choosing another issue was rejected because it would add review load before current open work is resolved.",
+        publicSummary: `${args.repoFullName}: choose-another-issue is deferred until existing open work is cleaned up.`,
+      },
+      counterfactualIssueFacts(args),
+      ["Assumes the contributor should avoid adding parallel review load while cleanup pressure is visible."],
+    );
+    add({
+      alternative: "replace",
+      group: "replace",
+      reason: "Replacing the repo was rejected because the cleanup obligation is attached to existing work in this repo.",
+      publicSummary: `${args.repoFullName}: replacing the repo does not remove the need to address existing open work here.`,
+    });
+  } else {
+    add({
+      alternative: "cleanup_first",
+      group: "cleanup",
+      reason: "Cleanup-first was rejected because the decision does not show enough open-work pressure to make cleanup the primary action.",
+      publicSummary: `${args.repoFullName}: cleanup-first is not the primary recommendation from the current queue signals.`,
+    });
+    add({
+      alternative: "close",
+      group: "close",
+      reason: "Closing or withdrawing work was rejected because no cleanup-priority blocker is present for this recommendation.",
+      publicSummary: `${args.repoFullName}: closing work is not the primary recommendation from the current blocker signals.`,
+    });
+  }
+
+  if (args.recommendation === "pursue") {
+    add({
+      alternative: "wait",
+      group: "wait",
+      reason: "Waiting was rejected because the lane and blocker facts support a narrow next step now.",
+      publicSummary: `${args.repoFullName}: waiting is not the clearest path while the current lane remains actionable.`,
+    });
+    add(
+      {
+        alternative: "choose_another_issue",
+        group: "choose_another_issue",
+        reason: "Choosing another issue was rejected because the selected repo path is currently actionable; switch only if preflight or duplicate checks fail.",
+        publicSummary: `${args.repoFullName}: choose-another-issue is a fallback if preflight or duplicate checks fail.`,
+      },
+      counterfactualIssueFacts(args),
+      ["Assumes the chosen change stays narrow and passes local preflight before public posting."],
+    );
+    add({
+      alternative: "replace",
+      group: "replace",
+      reason: "Replacing the repo was rejected because this repo still has an actionable lane and no critical blocker in the decision.",
+      publicSummary: `${args.repoFullName}: replacing the repo is not favored while this repo has an actionable lane.`,
+    });
+  } else if (args.recommendation === "watch") {
+    add({
+      alternative: "wait",
+      group: "wait",
+      reason: "Pure waiting was rejected because an actionable, non-duplicate issue report can still fit this lane.",
+      publicSummary: `${args.repoFullName}: pure waiting is not required if an actionable, non-duplicate report is available.`,
+    });
+    add(
+      {
+        alternative: "choose_another_issue",
+        group: "choose_another_issue",
+        reason: "Choosing another issue was rejected unless duplicate checks or issue-quality evidence make the current candidate unsuitable.",
+        publicSummary: `${args.repoFullName}: choose-another-issue is a fallback after duplicate and issue-quality checks.`,
+      },
+      counterfactualIssueFacts(args),
+      ["Assumes any issue report remains evidence-backed and non-duplicate."],
+    );
+  } else if (args.recommendation === "maintainer_lane") {
+    add({
+      alternative: "wait",
+      group: "wait",
+      reason: "Waiting was rejected because owner-side intake or queue-health work can improve the repo without adding outside-contributor work.",
+      publicSummary: `${args.repoFullName}: owner-side repo-health work is preferred over passive waiting.`,
+    });
+    add({
+      alternative: "choose_another_issue",
+      group: "choose_another_issue",
+      reason: "Choosing another contributor issue was rejected because the current lane is maintainer-owned repo health work.",
+      publicSummary: `${args.repoFullName}: contributor issue selection is separated from maintainer-lane repo-health work.`,
+    });
+  } else if (args.recommendation === "avoid_for_now") {
+    add({
+      alternative: "wait",
+      group: "wait",
+      reason: "Only waiting was rejected because a cleaner repo or refreshed lane signal is a more concrete next planning step.",
+      publicSummary: `${args.repoFullName}: waiting alone is less useful than rerunning after signals improve or choosing a cleaner target.`,
+    });
+    add({
+      alternative: "open_direct_pr",
+      group: "direct_pr",
+      reason: "Opening a direct PR was rejected because current blocker or lane facts make new implementation work a poor fit.",
+      publicSummary: `${args.repoFullName}: direct PR work is not advised until blocker or lane signals improve.`,
+    });
+  }
+
+  return drafts.slice(0, 5).map((draft, index) => ({ ...draft, rank: index + 1 }));
+}
+
+function counterfactualReason(draft: Omit<CounterfactualReasonDraft, "facts" | "assumptions">, facts: string[], assumptions: string[]): CounterfactualReasonDraft {
+  return {
+    ...draft,
+    reason: sanitizeCounterfactualPublicText(draft.reason),
+    facts: uniqueCounterfactualStrings(facts.map(sanitizeCounterfactualPublicText)).slice(0, 5),
+    assumptions: uniqueCounterfactualStrings(assumptions.map(sanitizeCounterfactualPublicText)).slice(0, 4),
+    publicSummary: sanitizeCounterfactualPublicText(draft.publicSummary),
+  };
+}
+
+function counterfactualBaseFacts(args: {
+  repoFullName: string;
+  recommendation: DecisionRecommendation;
+  lane: string;
+  queue: RepoDecision["queue"];
+  outcome: ContributorOutcomeHistory["repoOutcomes"][number] | undefined;
+  issueQuality: IssueQualitySummary | undefined;
+  blockers: ScoreBlocker[];
+}): string[] {
+  const blockerCodes = args.blockers.map((blocker) => blocker.code);
+  return [
+    `${args.repoFullName}: current recommendation is ${args.recommendation}.`,
+    `${args.repoFullName}: configured lane is ${args.lane}.`,
+    `${args.repoFullName}: cached repo queue has ${args.queue.openPullRequests} open PR(s) and ${args.queue.openIssues} open issue(s).`,
+    ...(args.outcome ? [`${args.repoFullName}: contributor has ${args.outcome.openPullRequests ?? 0} open PR(s) in this repo.`] : []),
+    blockerCodes.length > 0 ? `${args.repoFullName}: visible blocker code(s): ${blockerCodes.join(", ")}.` : `${args.repoFullName}: no visible blocker code is present.`,
+    ...(args.issueQuality ? counterfactualIssueFacts(args) : []),
+  ];
+}
+
+function counterfactualBaseAssumptions(args: {
+  lane: string;
+  roleContext: RoleContext;
+  outcome: ContributorOutcomeHistory["repoOutcomes"][number] | undefined;
+  issueQuality: IssueQualitySummary | undefined;
+}): string[] {
+  return [
+    ...(!args.outcome && !args.roleContext.maintainerLane ? ["Repo-specific contributor outcome data is missing; lane and queue signals carry more weight."] : []),
+    ...(!args.issueQuality ? ["No issue-quality cache is available for this repo decision."] : []),
+    ...(args.lane === "split" ? ["Split-lane planning assumes the final work choice still passes duplicate and scope checks."] : []),
+  ];
+}
+
+function counterfactualIssueFacts(args: { repoFullName: string; issueQuality: IssueQualitySummary | undefined }): string[] {
+  if (!args.issueQuality) return [];
+  return [
+    `${args.repoFullName}: issue-quality cache has ${args.issueQuality.readyCount} ready candidate(s), ${args.issueQuality.needsProofCount} needing proof, ${args.issueQuality.holdCount} on hold, and ${args.issueQuality.doNotUseCount} do-not-use candidate(s).`,
+  ];
+}
+
+function sanitizeCounterfactualPublicText(value: string): string {
+  return sanitizeTradeoffPublicText(value);
+}
+
+function uniqueCounterfactualStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
 type RepoCopyContext = {
   repoFullName: string;
   lane: string;
@@ -1555,4 +1786,6 @@ export const __decisionPackInternals = {
   round,
   buildRepoDecisionTradeoffSummary,
   sanitizeTradeoffPublicText,
+  buildRepoDecisionCounterfactualReasons,
+  sanitizeCounterfactualPublicText,
 };

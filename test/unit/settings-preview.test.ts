@@ -33,9 +33,11 @@ function settings(overrides: Partial<RepositorySettings> = {}): RepositorySettin
   return {
     repoFullName: repo.fullName,
     commentMode: "detected_contributors_only",
+    publicAudienceMode: "oss_maintainer",
     publicSignalLevel: "standard",
     checkRunMode: "off",
     checkRunDetailLevel: "standard",
+    gateCheckMode: "off",
     autoLabelEnabled: true,
     gittensorLabel: "gittensor",
     createMissingLabel: true,
@@ -69,8 +71,9 @@ describe("decidePublicSurface", () => {
     expect(decidePublicSurface({ settings: settings(), authorLogin: "robot", authorType: "Bot", minerStatus: "confirmed" }).skipReason).toBe("bot_author");
     expect(decidePublicSurface({ settings: settings(), authorLogin: "app[bot]", minerStatus: "confirmed" }).skipReason).toBe("bot_author");
     expect(decidePublicSurface({ settings: settings(), authorLogin: "owner", authorAssociation: "OWNER", minerStatus: "confirmed" }).skipReason).toBe("maintainer_author");
-    expect(decidePublicSurface({ settings: settings(), authorLogin: "x", minerStatus: "not_found" }).skipReason).toBe("not_official_gittensor_miner");
-    expect(decidePublicSurface({ settings: settings(), authorLogin: "x", minerStatus: "unavailable" }).skipReason).toBe("miner_detection_unavailable");
+    expect(decidePublicSurface({ settings: settings({ publicAudienceMode: "gittensor_only" }), authorLogin: "x", minerStatus: "not_found" }).skipReason).toBe("not_official_gittensor_miner");
+    expect(decidePublicSurface({ settings: settings({ publicAudienceMode: "gittensor_only" }), authorLogin: "x", minerStatus: "unavailable" }).skipReason).toBe("miner_detection_unavailable");
+    expect(decidePublicSurface({ settings: settings(), authorLogin: "x", minerStatus: "not_found" })).toMatchObject({ skipped: false, willComment: true, willLabel: false });
   });
 
   it("includes maintainer authors when configured", () => {
@@ -102,7 +105,9 @@ describe("buildRepoSettingsPreview", () => {
     const preview = buildRepoSettingsPreview({ ...base, settings: settings(), installation: healthyInstall, sample: { authorLogin: "miner", minerStatus: "confirmed" } });
     expect(preview.decision.willComment).toBe(true);
     expect(preview.appliedLabel).toBe("gittensor");
-    expect(preview.previewComment).toContain("Gittensory contribution context");
+    expect(preview.previewComment).toContain("<!-- gittensory-pr-panel:v1 -->");
+    expect(preview.previewComment).toContain("Gittensory");
+    expect(preview.previewComment).toContain("Confirmed Gittensor contributor");
     expect(preview.warnings).toHaveLength(0);
     expect(preview.installPreview).toMatchObject({
       status: "ready",
@@ -176,8 +181,22 @@ describe("buildRepoSettingsPreview", () => {
     expect(withoutChecks.warnings.some((warning) => /Checks: write/.test(warning))).toBe(false);
   });
 
+  it("explains a missing Checks: write permission when the opt-in gate is enabled", () => {
+    const preview = buildRepoSettingsPreview({
+      ...base,
+      settings: settings({ publicSurface: "off", commentMode: "off", autoLabelEnabled: false, gateCheckMode: "enabled" }),
+      installation: { ...healthyInstall, status: "needs_attention", missingPermissions: ["checks"] },
+      sample: { authorLogin: "contributor", minerStatus: "not_found" },
+    });
+
+    expect(preview.decision).toMatchObject({ skipped: false, actions: ["none"] });
+    expect(preview.warnings.some((warning) => /Gate checks are enabled.*Checks: write/.test(warning))).toBe(true);
+    expect(preview.installPreview.permissions).toMatchObject({ status: "needs_attention", missing: ["checks"] });
+    expect(preview.installPreview.publicOutputs).toEqual(expect.arrayContaining(["Opt-in Gittensory Gate check run."]));
+  });
+
   it("shows a quiet skip for a non-miner author with no rendered comment", () => {
-    const preview = buildRepoSettingsPreview({ ...base, settings: settings(), installation: healthyInstall, sample: { authorLogin: "drive-by", minerStatus: "not_found" } });
+    const preview = buildRepoSettingsPreview({ ...base, settings: settings({ publicAudienceMode: "gittensor_only" }), installation: healthyInstall, sample: { authorLogin: "drive-by", minerStatus: "not_found" } });
     expect(preview.decision).toMatchObject({ skipped: true, skipReason: "not_official_gittensor_miner" });
     expect(preview.previewComment).toBeNull();
     expect(preview.appliedLabel).toBeNull();
@@ -245,7 +264,7 @@ describe("buildRepoSettingsPreview", () => {
     expect(preview.installPreview.status).toBe("needs_attention");
     expect(preview.installPreview.checklist.find((item) => item.id === "public-outputs")).toMatchObject({
       status: "needs_attention",
-      action: expect.stringContaining("confirmed-miner-only"),
+      action: expect.stringContaining("advisory-only"),
     });
     expect(preview.installPreview.checklist.find((item) => item.id === "manual-controls")).toMatchObject({
       status: "needs_attention",
@@ -262,5 +281,31 @@ describe("buildRepoSettingsPreview", () => {
     });
     expect(preview.previewComment).not.toBeNull();
     expect(preview.previewComment ?? "").not.toMatch(/wallet|hotkey|trust score|raw trust|scoreability|payout|reward|farming|\/100|reviewability\s*\d/i);
+  });
+
+  it("reports a generic needs-attention summary when health is degraded but no permission or event is missing", () => {
+    const preview = buildRepoSettingsPreview({
+      ...base,
+      settings: settings(),
+      installation: { ...healthyInstall, status: "needs_attention", missingPermissions: [], missingEvents: [] },
+      sample: { authorLogin: "miner", minerStatus: "confirmed" },
+    });
+    expect(preview.installPreview.status).toBe("needs_attention");
+    expect(preview.installPreview.permissions.summary).toMatch(/needs attention; review remediation/i);
+    expect(preview.installPreview.permissions.missing).toEqual([]);
+  });
+
+  it("requires no issues/checks write scope and lists a no-output sample when every public action is disabled", () => {
+    const preview = buildRepoSettingsPreview({
+      ...base,
+      settings: settings({ publicSurface: "label_only", autoLabelEnabled: false, commentMode: "off", checkRunMode: "off" }),
+      installation: healthyInstall,
+      sample: { authorLogin: "miner", minerStatus: "confirmed" },
+    });
+    expect(preview.decision).toMatchObject({ skipped: false, willComment: false, willLabel: false, willCheckRun: false, actions: ["none"] });
+    // requiredInstallPermissions keeps only read scopes when no public write action is enabled.
+    expect(preview.installPreview.permissions.required).toEqual(["metadata: read", "pull_requests: read"]);
+    expect(preview.installPreview.publicOutputs).toEqual(["No public comment, label, or check run for this sample."]);
+    expect(preview.installPreview.checklist.find((item) => item.id === "public-outputs")?.summary).toMatch(/no public output action is enabled/i);
   });
 });

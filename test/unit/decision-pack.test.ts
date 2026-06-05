@@ -96,7 +96,7 @@ describe("decision-pack service", () => {
         outcome: undefined,
         syncState: { openPullRequestsCount: 1, openIssuesCount: 2, recentMergedPullRequestsCount: 3 } as any,
       }),
-    ).toMatchObject({ recommendation: "watch", queue: { openPullRequests: 1, openIssues: 2, mergedPullRequests: 3 }, rewardUpside: { issueDiscoveryShare: 0.02 } });
+    ).toMatchObject({ recommendation: "watch", queue: { openPullRequests: 1, openIssues: 2, mergedPullRequests: 3 }, rewardUpside: { issueDiscoveryShare: 0.018 } });
     expect(
       __decisionPackInternals.buildRepoDecision({
         repo: repo("owner/inactive", 0, 0),
@@ -109,6 +109,31 @@ describe("decision-pack service", () => {
     expect(__decisionPackInternals.severityRank("info")).toBe(1);
     expect(__decisionPackInternals.clamp(10, 0, 5)).toBe(5);
     expect(__decisionPackInternals.round(1.23456)).toBe(1.2346);
+  });
+
+  it("applies OSS_EMISSION_SHARE to rewardUpside lane shares (not the raw emission share)", () => {
+    const outsideRole = { maintainerLane: false } as any;
+    // Split repo: emissionShare 0.04, issueDiscoveryShare 0.25. Lane shares are a split of the OSS
+    // mining pool (emissionShare * 0.9), matching preview.ts laneMath / reward-risk.ts -- NOT the raw split.
+    const split = __decisionPackInternals.buildRepoDecision({
+      repo: repo("owner/split", 0.04, 0.25),
+      roleContext: outsideRole,
+      outcome: undefined,
+    }).rewardUpside;
+    expect(split.emissionShare).toBe(0.04); // raw value preserved (mirrors laneMath.repoEmissionShare)
+    expect(split.directPrShare).toBeCloseTo(0.04 * 0.9 * 0.75, 10); // 0.027
+    expect(split.issueDiscoveryShare).toBeCloseTo(0.04 * 0.9 * 0.25, 10); // 0.009
+    // A single lane share can never exceed the repo's whole OSS mining pool (emissionShare * 0.9).
+    expect(split.directPrShare).toBeLessThanOrEqual(0.04 * 0.9 + 1e-9);
+
+    // An explicit snapshot-provided OSS_EMISSION_SHARE override is honored.
+    const overridden = __decisionPackInternals.buildRepoDecision({
+      repo: repo("owner/override", 0.04, 0),
+      roleContext: outsideRole,
+      outcome: undefined,
+      ossEmissionShare: 0.8,
+    }).rewardUpside;
+    expect(overridden.directPrShare).toBeCloseTo(0.04 * 0.8, 10); // 0.032
   });
 
   it("feeds repo outcome patterns into repo decisions without inflating maintainer-lane evidence", () => {
@@ -1048,7 +1073,8 @@ describe("decision-pack service", () => {
         summary: "0 open issues evaluated.",
       },
     });
-    expect(emptyQualityDecision.priorityScore).toBe(40);
+    // 38, not 40: upside = issueDiscoveryShare (0.02 * OSS_EMISSION_SHARE 0.9 = 0.018) * 1000 = 18.
+    expect(emptyQualityDecision.priorityScore).toBe(38);
   });
 
   it("issues avoid_for_now reasoning with sanitized public copy", () => {
@@ -1255,6 +1281,69 @@ describe("decision-pack service", () => {
     expect(serialized).not.toMatch(FORBIDDEN_PUBLIC_TRADEOFF_LANGUAGE);
     expect(
       __decisionPackInternals.sanitizeTradeoffPublicText(
+        "wallet hotkey reward-estimate payout scoreability public-score-prediction trust-score private-reviewability private-scoreability farming-language",
+      ),
+    ).not.toMatch(FORBIDDEN_PUBLIC_TRADEOFF_LANGUAGE);
+  });
+
+  it("adds deterministic counterfactual reasons for wait, cleanup-first, and choose-another-issue alternatives", () => {
+    const pursue = __decisionPackInternals.buildRepoDecision({
+      repo: repoWithLabels("owner/direct-counterfactual", 0.04, 0, { bug: 1.1 }),
+      roleContext: { maintainerLane: false } as any,
+      outcome: { openPullRequests: 0, mergedPullRequests: 2, closedPullRequestRate: 0, credibility: 1 } as any,
+      syncState: { primaryLanguage: "TypeScript", openPullRequestsCount: 1, openIssuesCount: 6 } as any,
+      languageSet: new Set(["typescript"]),
+      labelHistory: new Set(["bug"]),
+    });
+    expect(pursue.recommendation).toBe("pursue");
+    expect(pursue.counterfactualReasons?.map((reason) => reason.alternative)).toEqual(
+      expect.arrayContaining(["wait", "cleanup_first", "choose_another_issue"]),
+    );
+    expect(pursue.counterfactualReasons?.find((reason) => reason.alternative === "wait")).toMatchObject({
+      rank: expect.any(Number),
+      facts: expect.arrayContaining([expect.stringContaining("current recommendation is pursue")]),
+      assumptions: expect.arrayContaining([expect.stringContaining("No issue-quality cache")]),
+    });
+
+    const cleanupFirst = __decisionPackInternals.buildRepoDecision({
+      repo: repoWithLabels("owner/cleanup-counterfactual", 0.04, 0, { bug: 1.1 }),
+      roleContext: { maintainerLane: false } as any,
+      outcome: { openPullRequests: 7, mergedPullRequests: 1, closedPullRequestRate: 0.1, credibility: 1 } as any,
+      syncState: { primaryLanguage: "TypeScript", openPullRequestsCount: 8, openIssuesCount: 4 } as any,
+      languageSet: new Set(["typescript"]),
+      labelHistory: new Set(["bug"]),
+    });
+    expect(cleanupFirst.recommendation).toBe("cleanup_first");
+    expect(cleanupFirst.counterfactualReasons?.map((reason) => reason.alternative)).toEqual(
+      expect.arrayContaining(["wait", "choose_another_issue", "replace"]),
+    );
+    expect(cleanupFirst.counterfactualReasons?.map((reason) => reason.alternative)).not.toContain("cleanup_first");
+
+    const issueDiscovery = __decisionPackInternals.buildRepoDecision({
+      repo: repoWithLabels("owner/issue-counterfactual", 0.02, 1, { bug: 1.1 }),
+      roleContext: { maintainerLane: false } as any,
+      issueQuality: {
+        repoFullName: "owner/issue-counterfactual",
+        generatedAt: "2026-06-02T00:00:00.000Z",
+        lane: { repoFullName: "owner/issue-counterfactual", lane: "issue_discovery", issueDiscoveryShare: 1, directPrShare: 0, summary: "", contributorGuidance: "", maintainerGuidance: "" },
+        issues: [
+          { number: 11, title: "Ready issue", status: "ready", score: 90, reasons: [], warnings: [] },
+          { number: 12, title: "Covered issue", status: "do_not_use", score: 0, reasons: [], warnings: [] },
+        ],
+        summary: "2 open issues evaluated.",
+      },
+    });
+    const chooseAnother = issueDiscovery.counterfactualReasons?.find((reason) => reason.alternative === "choose_another_issue");
+    expect(issueDiscovery.recommendation).toBe("watch");
+    expect(chooseAnother?.facts.join(" ")).toMatch(/issue-quality cache has 1 ready candidate/);
+
+    const summaries = [pursue, cleanupFirst, issueDiscovery].flatMap((decision) => decision.counterfactualReasons?.map((reason) => reason.publicSummary) ?? []);
+    expect(summaries.join(" ")).not.toMatch(FORBIDDEN_PUBLIC_TRADEOFF_LANGUAGE);
+  });
+
+  it("sanitizes counterfactual public summaries", () => {
+    expect(
+      __decisionPackInternals.sanitizeCounterfactualPublicText(
         "wallet hotkey reward-estimate payout scoreability public-score-prediction trust-score private-reviewability private-scoreability farming-language",
       ),
     ).not.toMatch(FORBIDDEN_PUBLIC_TRADEOFF_LANGUAGE);

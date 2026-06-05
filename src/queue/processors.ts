@@ -2,6 +2,7 @@ import {
   countOpenIssues,
   countOpenPullRequests,
   getAgentCommandAnswer,
+  getInstallation,
   getLatestRepoGithubTotalsSnapshot,
   getFreshOfficialMinerDetection,
   getPullRequest,
@@ -18,6 +19,8 @@ import {
   listIssues,
   listIssueSignalSample,
   listLatestSignalSnapshotsByTarget,
+  listSignalSnapshots,
+  listRepoGithubTotalsSnapshotHistory,
   listOtherOpenPullRequests,
   listOpenPullRequests,
   listPullRequests,
@@ -28,6 +31,7 @@ import {
   listRepoSyncSegments,
   listRepositories,
   markInstallationDeleted,
+  markRepositoriesRemovedFromInstallation,
   persistAdvisory,
   recordAgentCommandFeedback,
   recordAuditEvent,
@@ -35,6 +39,7 @@ import {
   persistSignalSnapshot,
   recordWebhookEvent,
   replaceCollisionEdges,
+  upsertRepoQueueTrendSnapshot,
   upsertAgentCommandAnswer,
   upsertOfficialMinerDetection,
   rollupProductUsageDaily,
@@ -55,7 +60,7 @@ import {
   refreshInstallationHealth,
 } from "../github/backfill";
 import { contributorRepoStatsFromGittensor, fetchGittensorContributorSnapshot, fetchOfficialGittensorMiner, type GittensorContributorSnapshot, type OfficialGittensorMinerDetection } from "../gittensor/api";
-import { createOrUpdateCheckRun, getInstallationId } from "../github/app";
+import { createOrUpdateCheckRun, createOrUpdateGateCheckRun, getInstallationId } from "../github/app";
 import { createOrUpdateAgentCommandComment, createOrUpdatePrIntelligenceComment } from "../github/comments";
 import {
   buildMaintainerQueueDigest,
@@ -63,7 +68,6 @@ import {
   type GittensoryMentionCommandName,
   isAuthorizedCommandActor,
   isMaintainerAssociation,
-  isMaintainerOnlyCommand,
   isMaintainerQueueDigestCommand,
   parseAgentCommandFeedbackContext,
   parseGittensoryMentionCommand,
@@ -71,7 +75,7 @@ import {
 import { ensurePullRequestLabel } from "../github/labels";
 import { fetchPublicContributorProfile } from "../github/public";
 import { refreshRegistry } from "../registry/sync";
-import { buildIssueAdvisory, buildPullRequestAdvisory } from "../rules/advisory";
+import { buildIssueAdvisory, buildPullRequestAdvisory, evaluateGateCheck } from "../rules/advisory";
 import { getOrCreateScoringModelSnapshot, refreshScoringModelSnapshot } from "../scoring/model";
 import { buildAndPersistContributorDecisionPack, loadDecisionPackSharedInputs } from "../services/decision-pack";
 import {
@@ -81,9 +85,11 @@ import {
 } from "../services/contributor-evidence-graph";
 import { executeAgentRun, explainBlockersWithAgent, planNextWork, preflightBranchWithAgent, preparePrPacketWithAgent } from "../services/agent-orchestrator";
 import { isAuthorizedGitHubSessionLogin } from "../auth/security";
+import { commandAuthorizationAllowedRoles, commandAuthorizationNeedsMinerDetection } from "../settings/command-authorization";
 import { loadIssueQualityReportMap } from "../services/issue-quality";
 import { generateWeeklyValueReport } from "../services/weekly-value-report";
 import { REPO_OUTCOME_PATTERNS_SIGNAL, computeRepoOutcomePatterns } from "../services/repo-outcome-patterns";
+import { buildQueueTrendReport, QUEUE_TREND_HISTORY_DAYS } from "../services/queue-trends";
 import {
   buildUpstreamRulesetSnapshot,
   detectAndPersistUpstreamDrift,
@@ -463,13 +469,16 @@ async function buildBurdenForecasts(env: Env, repoFullName?: string): Promise<vo
 export async function generateSignalSnapshots(env: Env, repoFullName?: string): Promise<void> {
   const repositories = (await listRepositories(env)).filter((repo) => repo.isRegistered && (!repoFullName || repo.fullName === repoFullName));
   for (const repo of repositories) {
-    const [issues, pullRequests, recentMergedPullRequests, labels, queueCounts, bounties] = await Promise.all([
+    const trendSince = new Date(Date.now() - QUEUE_TREND_HISTORY_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const [issues, pullRequests, recentMergedPullRequests, labels, queueCounts, bounties, totalsHistory, queueHealthHistory] = await Promise.all([
       listIssueSignalSample(env, repo.fullName),
       listOpenPullRequests(env, repo.fullName),
       listRecentMergedPullRequests(env, repo.fullName),
       listRepoLabels(env, repo.fullName),
       loadOpenQueueCounts(env, repo.fullName),
       listBountiesByRepo(env, repo.fullName),
+      listRepoGithubTotalsSnapshotHistory(env, repo.fullName, { sinceIso: trendSince, limit: 120 }),
+      listSignalSnapshots(env, "queue-health", repo.fullName),
     ]);
     const collisions = buildCollisionReport(repo.fullName, issues, pullRequests, recentMergedPullRequests);
     const queueHealth = buildQueueHealth(repo, issues, pullRequests, collisions, queueCounts);
@@ -487,6 +496,17 @@ export async function generateSignalSnapshots(env: Env, repoFullName?: string): 
       targetKey: repo.fullName,
       repoFullName: repo.fullName,
       payload: queueHealth as unknown as Record<string, never>,
+      generatedAt,
+    });
+    await upsertRepoQueueTrendSnapshot(env, {
+      repoFullName: repo.fullName,
+      payload: buildQueueTrendReport({
+        repoFullName: repo.fullName,
+        totalsSnapshots: totalsHistory,
+        queueHealthSnapshots: queueHealthHistory,
+        currentQueueHealth: queueHealth,
+        generatedAt,
+      }) as unknown as Record<string, never>,
       generatedAt,
     });
     await persistSignalSnapshot(env, {
@@ -574,12 +594,42 @@ async function processGitHubWebhook(env: Env, deliveryId: string, eventName: str
     }
 
     await upsertInstallation(env, payload);
-    if (eventName === "installation" && (payload.action === "created" || payload.action === "added")) {
+    const installationActor =
+      payload.installation?.account?.login ??
+      (payload.installation?.id ? (await getInstallation(env, payload.installation.id))?.accountLogin : undefined);
+    if (eventName === "installation_repositories" && payload.installation?.id) {
+      const addedRepos = payload.repositories_added?.map((repo) => repo.full_name).filter(Boolean) ?? [];
+      const removedRepos = payload.repositories_removed?.map((repo) => repo.full_name).filter(Boolean) ?? [];
+      for (const repo of payload.repositories_added ?? []) await upsertRepositoryFromGitHub(env, repo, payload.installation.id);
+      await markRepositoriesRemovedFromInstallation(env, payload.installation.id, removedRepos);
+      await Promise.all([
+        ...addedRepos.slice(0, 50).map((repoFullName) =>
+          recordGithubProductUsage(env, "github_installation_repository_added", {
+            actor: installationActor,
+            repoFullName,
+            targetKey: payload.installation?.id ? `installation:${payload.installation.id}` : repoFullName,
+            outcome: "completed",
+            metadata: { action: payload.action, repoCount: addedRepos.length, truncatedRepos: Math.max(addedRepos.length - 50, 0) },
+          }),
+        ),
+        ...removedRepos.slice(0, 50).map((repoFullName) =>
+          recordGithubProductUsage(env, "github_installation_repository_removed", {
+            actor: installationActor,
+            repoFullName,
+            targetKey: payload.installation?.id ? `installation:${payload.installation.id}` : repoFullName,
+            outcome: "completed",
+            metadata: { action: payload.action, repoCount: removedRepos.length, truncatedRepos: Math.max(removedRepos.length - 50, 0) },
+          }),
+        ),
+      ]);
+    }
+
+    if (eventName === "installation" && payload.action === "created") {
       const installedRepos = payload.repositories?.map((repo) => repo.full_name).filter(Boolean) ?? (payload.repository?.full_name ? [payload.repository.full_name] : [undefined]);
       await Promise.all(
         installedRepos.slice(0, 50).map((repoFullName) =>
           recordGithubProductUsage(env, "github_installation_created", {
-            actor: payload.installation?.account?.login,
+            actor: installationActor,
             repoFullName,
             targetKey: payload.installation?.id ? `installation:${payload.installation.id}` : repoFullName,
             outcome: "completed",
@@ -681,6 +731,9 @@ async function processGitHubWebhook(env: Env, deliveryId: string, eventName: str
   }
 }
 
+type PublicSurfaceOutput = "comment" | "label" | "check_run";
+type PublicSurfaceOutputFailure = { output: PublicSurfaceOutput; error: string };
+
 async function maybePublishPrPublicSurface(
   env: Env,
   installationId: number,
@@ -692,6 +745,19 @@ async function maybePublishPrPublicSurface(
   webhook: { deliveryId: string; authorType?: string | undefined },
 ): Promise<void> {
   const author = pr.authorLogin ?? null;
+  if (settings.gateCheckMode === "enabled" && advisory.headSha) {
+    const gateCheckResult = await createOrUpdateGateCheckRun(env, installationId, repoFullName, advisory);
+    if (gateCheckResult?.kind === "permission_missing") {
+      await recordAuditEvent(env, {
+        eventType: "github_app.gate_check_permission_missing",
+        actor: author,
+        targetKey: `${repoFullName}#${pr.number}`,
+        outcome: "error",
+        detail: gateCheckResult.warning,
+        metadata: { deliveryId: webhook.deliveryId, repoFullName },
+      });
+    }
+  }
   // Cheap, network-free skip checks (also avoids the miner lookup when it would be wasted).
   const prelim = decidePublicSurface({
     settings,
@@ -701,21 +767,22 @@ async function maybePublishPrPublicSurface(
     minerStatus: "not_checked",
   });
   if (prelim.skipped) {
-    if (prelim.skipReason === "surface_off") return;
     await auditPrVisibilitySkip(env, repoFullName, pr.number, author, prelim.skipReason ?? "skipped", webhook.deliveryId);
     return;
   }
+  if (prelim.actions.length === 1 && prelim.actions[0] === "none") return;
   if (!author) return;
 
+  const requireOfficialMiner = settings.publicAudienceMode === "gittensor_only";
   const official = await getCachedOfficialMinerDetection(env, author, {
     targetKey: `${repoFullName}#${pr.number}`,
     deliveryId: webhook.deliveryId,
   });
-  if (official.status === "unavailable") {
+  if (requireOfficialMiner && official.status === "unavailable") {
     await auditPrVisibilitySkip(env, repoFullName, pr.number, author, "miner_detection_unavailable", webhook.deliveryId);
     return;
   }
-  if (official.status !== "confirmed") {
+  if (requireOfficialMiner && official.status !== "confirmed") {
     await auditPrVisibilitySkip(env, repoFullName, pr.number, author, "not_official_gittensor_miner", webhook.deliveryId);
     return;
   }
@@ -724,22 +791,26 @@ async function maybePublishPrPublicSurface(
     authorLogin: author,
     authorType: webhook.authorType ?? null,
     authorAssociation: pr.authorAssociation ?? null,
-    minerStatus: "confirmed",
+    minerStatus: official.status,
   });
 
+  const publishCachedContributorActivity = official.status === "confirmed";
   const [contributorPullRequests, contributorIssues, repoIssues, repoPullRequests, repoBounties, github, cachedRepoStats] = await Promise.all([
-    listContributorPullRequests(env, author),
-    listContributorIssues(env, author),
+    publishCachedContributorActivity ? listContributorPullRequests(env, author) : Promise.resolve([]),
+    publishCachedContributorActivity ? listContributorIssues(env, author) : Promise.resolve([]),
     listIssues(env, repoFullName),
     listPullRequests(env, repoFullName),
     listBountiesByRepo(env, repoFullName),
     fetchPublicContributorProfile(author),
-    listContributorRepoStats(env, author),
+    publishCachedContributorActivity ? listContributorRepoStats(env, author) : Promise.resolve([]),
   ]);
-  const repoStats = authoritativeContributorRepoStats(official.snapshot, cachedRepoStats);
-  const detection = officialGittensorContributorDetection(official.snapshot, pr, contributorPullRequests, contributorIssues, repoStats);
+  const repoStats = official.status === "confirmed" ? authoritativeContributorRepoStats(official.snapshot, cachedRepoStats) : [];
+  const detection =
+    official.status === "confirmed"
+      ? officialGittensorContributorDetection(official.snapshot, pr, contributorPullRequests, contributorIssues, repoStats)
+      : { detected: false, reason: "Official Gittensor API did not confirm this GitHub user.", priorPullRequests: 0, priorMergedPullRequests: 0, priorIssues: 0 };
 
-  const profile = buildContributorProfile(author, github, contributorPullRequests, contributorIssues, repoStats, official.snapshot);
+  const profile = buildContributorProfile(author, github, contributorPullRequests, contributorIssues, repoStats, official.status === "confirmed" ? official.snapshot : null);
   const collisions = buildCollisionReport(repoFullName, repoIssues, repoPullRequests);
   const queueHealth = buildQueueHealth(repo, repoIssues, repoPullRequests, collisions);
   const preflight = buildPreflightResult(
@@ -757,36 +828,76 @@ async function maybePublishPrPublicSurface(
     repoPullRequests,
     repoBounties,
   );
+  const publishedOutputs: PublicSurfaceOutput[] = [];
+  const failedOutputs: PublicSurfaceOutputFailure[] = [];
+
+  if (decision.willCheckRun && advisory.headSha) {
+    try {
+      const checkRunResult = await createOrUpdateCheckRun(env, installationId, repoFullName, advisory, settings.checkRunDetailLevel);
+      if (checkRunResult?.kind === "permission_missing") {
+        failedOutputs.push({ output: "check_run", error: checkRunResult.warning });
+        await recordAuditEvent(env, {
+          eventType: "github_app.check_run_permission_missing",
+          actor: author,
+          targetKey: `${repoFullName}#${pr.number}`,
+          outcome: "error",
+          detail: checkRunResult.warning,
+          metadata: { deliveryId: webhook.deliveryId, repoFullName },
+        });
+      } else if (checkRunResult?.kind === "published") {
+        publishedOutputs.push("check_run");
+      }
+    } catch (error) {
+      const message = errorMessage(error);
+      failedOutputs.push({ output: "check_run", error: message });
+      await recordPublicSurfaceOutputFailure(env, "check_run", author, repoFullName, pr.number, webhook.deliveryId, message);
+    }
+  }
+
   if (decision.willComment) {
-    const commentArgs = { repo, pr, profile, detection, queueHealth, collisions, preflight, settings };
+    const commentArgs = { repo, pr, profile, detection, queueHealth, collisions, preflight, settings, gate: settings.gateCheckMode === "enabled" ? evaluateGateCheck(advisory) : undefined };
     const deterministicBody = buildPublicPrIntelligenceComment(commentArgs);
     // Optional AI rewrite (issue #151): disabled by default, source-free bundle only, quota-limited,
     // sanitizer-gated, and falls back to the deterministic body on any non-ok outcome.
-    const { body } = await rewritePublicPrIntelligenceComment(env, {
-      bundle: buildPublicCommentSignalBundle(commentArgs),
-      deterministicBody,
-      actor: author,
-      route: "github_app.pr_public_surface",
-    });
-    await createOrUpdatePrIntelligenceComment(env, installationId, repoFullName, pr.number, body);
+    try {
+      const { body } = await rewritePublicPrIntelligenceComment(env, {
+        bundle: buildPublicCommentSignalBundle(commentArgs),
+        deterministicBody,
+        actor: author,
+        route: "github_app.pr_public_surface",
+      });
+      await createOrUpdatePrIntelligenceComment(env, installationId, repoFullName, pr.number, body);
+      publishedOutputs.push("comment");
+    } catch (error) {
+      const message = errorMessage(error);
+      failedOutputs.push({ output: "comment", error: message });
+      await recordPublicSurfaceOutputFailure(env, "comment", author, repoFullName, pr.number, webhook.deliveryId, message);
+    }
   }
   if (decision.willLabel) {
-    await ensurePullRequestLabel(env, installationId, repoFullName, pr.number, settings.gittensorLabel, {
-      createMissingLabel: settings.createMissingLabel,
-    });
+    try {
+      await ensurePullRequestLabel(env, installationId, repoFullName, pr.number, settings.gittensorLabel, {
+        createMissingLabel: settings.createMissingLabel,
+      });
+      publishedOutputs.push("label");
+    } catch (error) {
+      const message = errorMessage(error);
+      failedOutputs.push({ output: "label", error: message });
+      await recordPublicSurfaceOutputFailure(env, "label", author, repoFullName, pr.number, webhook.deliveryId, message);
+    }
   }
-  if (decision.willCheckRun && advisory.headSha) {
-    const checkRunResult = await createOrUpdateCheckRun(env, installationId, repoFullName, advisory, settings.checkRunDetailLevel);
-    if (checkRunResult?.kind === "permission_missing") {
+  if (publishedOutputs.length === 0) {
+    if (failedOutputs.length > 0) {
       await recordAuditEvent(env, {
-        eventType: "github_app.check_run_permission_missing",
+        eventType: "github_app.pr_public_surface_failed",
         actor: author,
         targetKey: `${repoFullName}#${pr.number}`,
         outcome: "error",
-        detail: checkRunResult.warning,
-        metadata: { deliveryId: webhook.deliveryId, repoFullName },
+        detail: failedOutputs.map((failure) => failure.output).join(","),
+        metadata: { deliveryId: webhook.deliveryId, repoFullName, failedOutputs },
       });
     }
+    return;
   }
   await recordAuditEvent(env, {
     eventType: "github_app.pr_public_surface_published",
@@ -798,6 +909,10 @@ async function maybePublishPrPublicSurface(
       publicSurface: settings.publicSurface,
       label: decision.willLabel ? settings.gittensorLabel : null,
       checkRunMode: settings.checkRunMode,
+      gateCheckMode: settings.gateCheckMode,
+      publicAudienceMode: settings.publicAudienceMode,
+      publishedOutputs,
+      failedOutputs,
     },
   });
   await recordGithubProductUsage(env, "pr_public_surface_published", {
@@ -809,7 +924,30 @@ async function maybePublishPrPublicSurface(
       publicSurface: settings.publicSurface,
       labelApplied: decision.willLabel,
       checkRunMode: settings.checkRunMode,
+      gateCheckMode: settings.gateCheckMode,
+      publicAudienceMode: settings.publicAudienceMode,
+      publishedOutputs,
+      failedOutputs,
     },
+  });
+}
+
+async function recordPublicSurfaceOutputFailure(
+  env: Env,
+  output: PublicSurfaceOutput,
+  actor: string | null,
+  repoFullName: string,
+  pullNumber: number,
+  deliveryId: string,
+  error: string,
+): Promise<void> {
+  await recordAuditEvent(env, {
+    eventType: `github_app.pr_${output}_publish_failed`,
+    actor,
+    targetKey: `${repoFullName}#${pullNumber}`,
+    outcome: "error",
+    detail: error,
+    metadata: { deliveryId, repoFullName, output },
   });
 }
 
@@ -913,38 +1051,16 @@ async function maybeProcessGittensoryMentionCommand(env: Env, deliveryId: string
     return true;
   }
 
-  const [repo, cachedPullRequest] = await Promise.all([getRepository(env, repoFullName), getPullRequest(env, repoFullName, issue.number)]);
+  const [repo, cachedPullRequest, settings] = await Promise.all([getRepository(env, repoFullName), getPullRequest(env, repoFullName, issue.number), getRepositorySettings(env, repoFullName)]);
   const pullRequestAuthor = cachedPullRequest?.authorLogin ?? issue.user?.login ?? null;
-  const maintainerActor = isMaintainerAssociation(commenterAssociation);
-  if (isMaintainerOnlyCommand(command.name) && !maintainerActor) {
-    await recordAuditEvent(env, {
-      eventType: "github_app.agent_command_skipped",
-      actor: commenter,
-      targetKey: `${repoFullName}#${issue.number}`,
-      outcome: "denied",
-      detail: "maintainer_command_requires_maintainer",
-      metadata: { deliveryId, command: command.name },
-    });
-    await recordAgentCommandUsage(env, {
-      repoFullName,
-      targetKey: `${repoFullName}#${issue.number}`,
-      actor: commenter,
-      command: command.name,
-      actorKind: "none",
-      outcome: "skipped",
-      detail: "maintainer_command_requires_maintainer",
-      family: "maintainer_digest",
-    });
-    await recordGithubProductUsage(env, "agent_command_skipped", {
-      actor: commenter,
-      repoFullName,
-      targetKey: `${repoFullName}#${issue.number}`,
-      outcome: "denied",
-      metadata: { command: command.name, reason: "maintainer_command_requires_maintainer", family: "queue_digest" },
-    });
-    return true;
-  }
-  const official = pullRequestAuthor && (!maintainerActor || command.name === "miner-context")
+  const needsMinerDetection = commandAuthorizationNeedsMinerDetection({
+    policy: settings.commandAuthorization,
+    commandName: command.name,
+    commenterLogin: commenter,
+    commenterAssociation,
+    pullRequestAuthorLogin: pullRequestAuthor,
+  });
+  const official = pullRequestAuthor && (needsMinerDetection || command.name === "miner-context")
     ? await getCachedOfficialMinerDetection(env, pullRequestAuthor, { targetKey: `${repoFullName}#${issue.number}`, deliveryId })
     : undefined;
   const authorization = isAuthorizedCommandActor({
@@ -953,6 +1069,7 @@ async function maybeProcessGittensoryMentionCommand(env: Env, deliveryId: string
     commenterAssociation,
     pullRequestAuthorLogin: pullRequestAuthor,
     officialAuthorDetection: official,
+    commandAuthorizationPolicy: settings.commandAuthorization,
   });
   if (!authorization.authorized) {
     await recordAuditEvent(env, {
@@ -961,7 +1078,7 @@ async function maybeProcessGittensoryMentionCommand(env: Env, deliveryId: string
       targetKey: `${repoFullName}#${issue.number}`,
       outcome: authorization.reason === "miner_detection_unavailable" ? "error" : "completed",
       detail: authorization.reason,
-      metadata: { deliveryId, command: command.name },
+      metadata: { deliveryId, command: command.name, allowedRoles: commandAuthorizationAllowedRoles(settings.commandAuthorization, command.name) },
     });
     await recordAgentCommandUsage(env, {
       repoFullName,
@@ -994,7 +1111,7 @@ async function maybeProcessGittensoryMentionCommand(env: Env, deliveryId: string
         repoFullName,
         issue,
         pullRequest: cachedPullRequest,
-      });
+      }, command.question);
   const body = buildPublicAgentCommandComment({
     command,
     repo,
@@ -1066,6 +1183,7 @@ async function buildMentionCommandBundle(
     issue: NonNullable<GitHubWebhookPayload["issue"]>;
     pullRequest: Awaited<ReturnType<typeof getPullRequest>>;
   },
+  question?: string | undefined,
 ) {
   if (commandName === "help" || commandName === "miner-context") return null;
   if (commandName === "blockers") return explainBlockersWithAgent(env, { login: context.login, repoFullName: context.repoFullName, surface: "github_comment" });
@@ -1075,7 +1193,10 @@ async function buildMentionCommandBundle(
     login: context.login,
     repoFullName: context.repoFullName,
     surface: "github_comment",
-    objective: `Respond to @gittensory ${commandName} for ${context.repoFullName}#${context.issue.number}.`,
+    objective:
+      commandName === "ask" && question && question.trim().length > 0
+        ? `Respond to @gittensory ask for ${context.repoFullName}#${context.issue.number}. Question: ${question.trim().slice(0, 280)}`
+        : `Respond to @gittensory ${commandName} for ${context.repoFullName}#${context.issue.number}.`,
   });
 }
 
