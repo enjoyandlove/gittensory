@@ -361,133 +361,6 @@ function summarize(manifest: FocusManifest, blocked: string[], wanted: string[])
   return "Maintainer focus manifest applied with no path-specific verdict.";
 }
 
-// ---------------------------------------------------------------------------
-// Policy schema (#296)
-// ---------------------------------------------------------------------------
-// ─── Contribution Lanes ──────────────────────────────────────────────────────
-
-export type ContributionLanePreference = "preferred" | "neutral" | "discouraged";
-
-/**
- * Standalone contribution lane summary derived from a focus manifest.
- * Does not require a specific change set — describes the general contribution
- * policy the maintainer has declared so contributors and repo owners can plan
- * their work before touching any files.
- */
-export type ContributionLanes = {
-  present: boolean;
-  source: FocusManifestSource;
-  directPrLane: ContributionLanePreference;
-  issueDiscoveryLane: ContributionLanePreference;
-  preferredEntryPaths: string[];
-  discouragedEntryPaths: string[];
-  validationExpectations: string[];
-  issueEntryGuidance: string[];
-  prEntryGuidance: string[];
-  warnings: string[];
-  summary: string;
-};
-
-/**
- * Derive contribution lanes from a focus manifest without requiring a specific
- * change set. The result is deterministic, explainable, and public-safe: no
- * maintainer-private notes, scoreability, reviewability, reward/risk, wallet,
- * hotkey, or raw trust context appears in any output field.
- */
-export function deriveContributionLanes(manifest: FocusManifest): ContributionLanes {
-  if (!manifest.present) {
-    return {
-      present: false,
-      source: manifest.source,
-      directPrLane: "neutral",
-      issueDiscoveryLane: "neutral",
-      preferredEntryPaths: [],
-      discouragedEntryPaths: [],
-      validationExpectations: [],
-      issueEntryGuidance: [],
-      prEntryGuidance: [],
-      warnings: manifest.warnings,
-      summary: "No maintainer focus manifest; contribution lanes are not constrained.",
-    };
-  }
-
-  const directPrLane = deriveDirectPrLane(manifest);
-  const issueDiscoveryLane = deriveIssueDiscoveryLane(manifest);
-  const validationExpectations = deriveValidationExpectations(manifest);
-  const issueEntryGuidance = deriveIssueEntryGuidance(manifest);
-  const prEntryGuidance = derivePrEntryGuidance(manifest);
-
-  return {
-    present: true,
-    source: manifest.source,
-    directPrLane,
-    issueDiscoveryLane,
-    preferredEntryPaths: manifest.wantedPaths.filter(isFocusManifestPublicSafe),
-    discouragedEntryPaths: manifest.blockedPaths.filter(isFocusManifestPublicSafe),
-    validationExpectations,
-    issueEntryGuidance,
-    prEntryGuidance,
-    warnings: manifest.warnings,
-    summary: lanesSummary(manifest, directPrLane, issueDiscoveryLane),
-  };
-}
-
-function deriveDirectPrLane(manifest: FocusManifest): ContributionLanePreference {
-  if (manifest.issueDiscoveryPolicy === "encouraged") return "discouraged";
-  if (manifest.wantedPaths.length > 0) return "preferred";
-  return "neutral";
-}
-
-function deriveIssueDiscoveryLane(manifest: FocusManifest): ContributionLanePreference {
-  if (manifest.issueDiscoveryPolicy === "encouraged") return "preferred";
-  if (manifest.issueDiscoveryPolicy === "discouraged") return "discouraged";
-  return "neutral";
-}
-
-function deriveValidationExpectations(manifest: FocusManifest): string[] {
-  const expectations: string[] = [];
-  if (manifest.linkedIssuePolicy === "required") expectations.push("Link a tracked issue before opening a PR.");
-  else if (manifest.linkedIssuePolicy === "preferred") expectations.push("Link a tracked issue if one exists.");
-  for (const expectation of manifest.testExpectations) {
-    if (isFocusManifestPublicSafe(expectation)) expectations.push(expectation);
-  }
-  return expectations;
-}
-
-function deriveIssueEntryGuidance(manifest: FocusManifest): string[] {
-  const guidance: string[] = [];
-  if (manifest.issueDiscoveryPolicy === "encouraged") guidance.push("Issue discovery reports are welcomed; search for gaps before opening a PR.");
-  else if (manifest.issueDiscoveryPolicy === "discouraged") guidance.push("Prefer direct fixes over new issue reports; this repo discourages issue-discovery submissions.");
-  if (manifest.linkedIssuePolicy === "required") guidance.push("Issues must be linked to a PR before it is opened.");
-  else if (manifest.linkedIssuePolicy === "preferred") guidance.push("Link an existing issue to your PR when one is available.");
-  return guidance;
-}
-
-function derivePrEntryGuidance(manifest: FocusManifest): string[] {
-  const guidance: string[] = [];
-  if (manifest.wantedPaths.length > 0) {
-    guidance.push(`Focus changes on maintainer-wanted areas: ${manifest.wantedPaths.slice(0, 5).join(", ")}.`);
-  }
-  if (manifest.blockedPaths.length > 0) {
-    guidance.push(`Avoid maintainer-blocked areas: ${manifest.blockedPaths.slice(0, 5).join(", ")}.`);
-  }
-  if (manifest.preferredLabels.length > 0) {
-    guidance.push(`Apply a maintainer-preferred label to your PR: ${manifest.preferredLabels.slice(0, 3).join(", ")}.`);
-  }
-  for (const note of manifest.publicNotes) {
-    if (isFocusManifestPublicSafe(note)) guidance.push(note);
-  }
-  return [...new Set(guidance)].filter(isFocusManifestPublicSafe);
-}
-
-function lanesSummary(manifest: FocusManifest, directPrLane: ContributionLanePreference, issueDiscoveryLane: ContributionLanePreference): string {
-  if (issueDiscoveryLane === "preferred" && directPrLane === "discouraged") return "Issue-discovery is the preferred contribution mode for this repo.";
-  if (issueDiscoveryLane === "discouraged" && manifest.wantedPaths.length > 0) return "Direct PRs focused on the wanted areas are the preferred contribution mode.";
-  if (directPrLane === "preferred") return "Direct PRs on the maintainer-wanted areas are preferred.";
-  if (issueDiscoveryLane === "discouraged") return "Direct PRs are preferred; issue-discovery submissions are discouraged.";
-  return "Contribution lanes are guided by the maintainer focus manifest.";
-}
-
 // ─── Focus Manifest Policy Schema ────────────────────────────────────────────
 
 /** Preference signal for a contribution lane derived from the focus manifest. */
@@ -526,12 +399,16 @@ export type FocusManifestPolicy = {
     issueDiscoveryPolicy: FocusManifestIssueDiscoveryPolicy;
     publicNotes: string[];
     readinessWarnings: string[];
+    entryGuidance: string[];
+    summary: string;
   };
   authenticated: {
     manifestSource: FocusManifestSource;
     privateNoteCount: number;
     manifestWarningCount: number;
     parseWarnings: string[];
+    readinessWarnings: string[];
+    maintainerContext: string[];
   };
 };
 
@@ -540,12 +417,35 @@ export type FocusManifestPolicy = {
  * {@link FocusManifestPolicy}. Public-safe fields are segregated from authenticated
  * (owner-only) fields. No reward, wallet, hotkey, raw trust, or private scoring
  * language is allowed in public-safe output — unsafe strings are silently dropped.
+ *
+ * `repoFullName` is optional — when omitted it defaults to an empty string. Callers
+ * that persist the policy should supply the full name; single-manifest analysis
+ * callers may omit it.
  */
-export function compileFocusManifestPolicy(repoFullName: string, manifest: FocusManifest, options: { generatedAt?: string } = {}): FocusManifestPolicy {
+export function compileFocusManifestPolicy(manifest: FocusManifest, options?: { generatedAt?: string }): FocusManifestPolicy;
+export function compileFocusManifestPolicy(repoFullName: string, manifest: FocusManifest, options?: { generatedAt?: string }): FocusManifestPolicy;
+export function compileFocusManifestPolicy(
+  repoFullNameOrManifest: string | FocusManifest,
+  manifestOrOptions?: FocusManifest | { generatedAt?: string },
+  options: { generatedAt?: string } = {},
+): FocusManifestPolicy {
+  let repoFullName: string;
+  let manifest: FocusManifest;
+  if (typeof repoFullNameOrManifest === "string") {
+    repoFullName = repoFullNameOrManifest;
+    manifest = manifestOrOptions as FocusManifest;
+  } else {
+    repoFullName = "";
+    manifest = repoFullNameOrManifest;
+    options = (manifestOrOptions as { generatedAt?: string }) ?? {};
+  }
+
   const generatedAt = options.generatedAt ?? new Date().toISOString();
   const safePublicNotes = manifest.publicNotes.filter(isFocusManifestPublicSafe);
   const contributionLanes = buildPolicyContributionLanes(manifest);
   const readinessWarnings = buildPolicyReadinessWarnings(manifest);
+  const entryGuidance = buildPolicyEntryGuidance(manifest);
+  const summary = buildPolicySummary(manifest);
 
   return {
     repoFullName,
@@ -565,14 +465,44 @@ export function compileFocusManifestPolicy(repoFullName: string, manifest: Focus
       issueDiscoveryPolicy: manifest.issueDiscoveryPolicy,
       publicNotes: safePublicNotes,
       readinessWarnings,
+      entryGuidance,
+      summary,
     },
     authenticated: {
       manifestSource: manifest.source,
       privateNoteCount: manifest.maintainerNotes.length,
       manifestWarningCount: manifest.warnings.length,
       parseWarnings: manifest.warnings,
+      readinessWarnings,
+      maintainerContext: manifest.maintainerNotes,
     },
   };
+}
+
+function buildPolicyEntryGuidance(manifest: FocusManifest): string[] {
+  const guidance: string[] = [];
+  if (manifest.wantedPaths.length > 0) {
+    guidance.push(`Focus changes on maintainer-wanted areas: ${manifest.wantedPaths.slice(0, 5).join(", ")}.`);
+  }
+  if (manifest.blockedPaths.length > 0) {
+    guidance.push(`Avoid maintainer-blocked areas: ${manifest.blockedPaths.slice(0, 5).join(", ")}.`);
+  }
+  if (manifest.linkedIssuePolicy === "required") guidance.push("Link a tracked issue before opening a pull request.");
+  else if (manifest.linkedIssuePolicy === "preferred") guidance.push("Linking a tracked issue is preferred before opening a pull request.");
+  if (manifest.preferredLabels.length > 0) {
+    const safeLabels = manifest.preferredLabels.filter(isFocusManifestPublicSafe);
+    if (safeLabels.length > 0) guidance.push(`Apply a maintainer-preferred label: ${safeLabels.slice(0, 3).join(", ")}.`);
+  }
+  guidance.push(...manifest.publicNotes.filter(isFocusManifestPublicSafe));
+  return [...new Set(guidance)].filter(isFocusManifestPublicSafe);
+}
+
+function buildPolicySummary(manifest: FocusManifest): string {
+  if (!manifest.present) return "No maintainer focus manifest; contribution guidance is not constrained.";
+  if (manifest.issueDiscoveryPolicy === "encouraged") return "Issue-discovery is the preferred contribution mode for this repo.";
+  if (manifest.issueDiscoveryPolicy === "discouraged") return "Direct PRs are preferred; issue-discovery submissions are discouraged.";
+  if (manifest.wantedPaths.length > 0) return "Direct PRs on the maintainer-wanted areas are preferred.";
+  return "Contribution guidance is derived from the maintainer focus manifest.";
 }
 
 function buildPolicyContributionLanes(manifest: FocusManifest): FocusManifestPolicyContributionLane[] {
@@ -582,42 +512,47 @@ function buildPolicyContributionLanes(manifest: FocusManifest): FocusManifestPol
   const safeWantedPaths = manifest.wantedPaths.filter(isFocusManifestPublicSafe);
   const safeBlockedPaths = manifest.blockedPaths.filter(isFocusManifestPublicSafe);
 
-  if (safeWantedPaths.length > 0 || manifest.testExpectations.length > 0) {
-    lanes.push({
-      id: "direct-pr",
-      preference: "preferred",
-      title: "Direct PR lane",
-      summary: "Contribute changes in maintainer-wanted areas with required validation evidence.",
-      preferredPaths: safeWantedPaths,
-      discouragedPaths: safeBlockedPaths,
-      validationExpectations: manifest.testExpectations.filter(isFocusManifestPublicSafe),
-      publicNotes: manifest.publicNotes.filter(isFocusManifestPublicSafe),
-    });
-  }
+  const directPrPreference: "preferred" | "neutral" | "discouraged" =
+    manifest.issueDiscoveryPolicy === "encouraged" ? "discouraged"
+    : safeWantedPaths.length > 0 || manifest.testExpectations.length > 0 ? "preferred"
+    : "neutral";
 
-  if (manifest.issueDiscoveryPolicy === "encouraged") {
-    lanes.push({
-      id: "issue-discovery",
-      preference: "preferred",
-      title: "Issue discovery lane",
-      summary: "File well-scoped issue reports that the maintainer has indicated are welcome.",
-      preferredPaths: [],
-      discouragedPaths: safeBlockedPaths,
-      validationExpectations: [],
-      publicNotes: [],
-    });
-  } else if (manifest.issueDiscoveryPolicy === "discouraged") {
-    lanes.push({
-      id: "issue-discovery",
-      preference: "discouraged",
-      title: "Issue discovery lane",
-      summary: "The maintainer has indicated this repo prefers direct fixes over new issue reports.",
-      preferredPaths: [],
-      discouragedPaths: [],
-      validationExpectations: [],
-      publicNotes: [],
-    });
-  }
+  lanes.push({
+    id: "direct-pr",
+    preference: directPrPreference,
+    title: "Direct pull request lane",
+    summary:
+      directPrPreference === "discouraged"
+        ? "Direct pull requests are discouraged; issue discovery is the preferred entry mode."
+        : directPrPreference === "preferred"
+          ? "Contribute changes in maintainer-wanted areas with required validation evidence."
+          : "Direct pull requests are accepted when they stay inside maintainer-wanted scope.",
+    preferredPaths: safeWantedPaths,
+    discouragedPaths: safeBlockedPaths,
+    validationExpectations: manifest.testExpectations.filter(isFocusManifestPublicSafe),
+    publicNotes: manifest.publicNotes.filter(isFocusManifestPublicSafe),
+  });
+
+  const issueDiscoveryPreference: "preferred" | "neutral" | "discouraged" =
+    manifest.issueDiscoveryPolicy === "encouraged" ? "preferred"
+    : manifest.issueDiscoveryPolicy === "discouraged" ? "discouraged"
+    : "neutral";
+
+  lanes.push({
+    id: "issue-discovery",
+    preference: issueDiscoveryPreference,
+    title: "Issue discovery lane",
+    summary:
+      issueDiscoveryPreference === "preferred"
+        ? "File well-scoped issue reports that the maintainer has indicated are welcome."
+        : issueDiscoveryPreference === "discouraged"
+          ? "The maintainer has indicated this repo prefers direct fixes over new issue reports."
+          : "Issue discovery is optional; confirm maintainer scope before filing new issues.",
+    preferredPaths: [],
+    discouragedPaths: safeBlockedPaths,
+    validationExpectations: [],
+    publicNotes: [],
+  });
 
   return lanes;
 }
@@ -638,17 +573,21 @@ function buildPolicyReadinessWarnings(manifest: FocusManifest): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Contribution lane derivation (#297)
+// Contribution lane derivation
 // ---------------------------------------------------------------------------
 
 export type ContributionLanePreference = "preferred" | "neutral" | "discouraged";
 
 export type ContributionLanes = {
+  present: boolean;
+  source: FocusManifestSource;
   directPrLane: ContributionLanePreference;
   issueDiscoveryLane: ContributionLanePreference;
   preferredEntryPaths: string[];
   discouragedEntryPaths: string[];
   validationExpectations: string[];
+  issueEntryGuidance: string[];
+  prEntryGuidance: string[];
   guidanceText: string[];
   warnings: string[];
   summary: string;
@@ -662,25 +601,36 @@ export type ContributionLanes = {
 export function deriveContributionLanes(manifest: FocusManifest): ContributionLanes {
   if (!manifest.present) {
     return {
+      present: false,
+      source: manifest.source,
       directPrLane: "neutral",
       issueDiscoveryLane: "neutral",
       preferredEntryPaths: [],
       discouragedEntryPaths: [],
       validationExpectations: [],
+      issueEntryGuidance: [],
+      prEntryGuidance: [],
       guidanceText: [],
       warnings: manifest.warnings,
-      summary: "No focus manifest is available; using neutral lane defaults.",
+      summary: "No maintainer focus manifest; contribution lanes are not constrained (using neutral lane defaults).",
     };
   }
 
   const safeWanted = manifest.wantedPaths.filter(isFocusManifestPublicSafe);
   const safeBlocked = manifest.blockedPaths.filter(isFocusManifestPublicSafe);
-  const safeTestExpectations = manifest.testExpectations.filter(isFocusManifestPublicSafe);
   const safePublicNotes = manifest.publicNotes.filter(isFocusManifestPublicSafe);
 
+  const validationExpectations: string[] = [];
+  if (manifest.linkedIssuePolicy === "required") validationExpectations.push("Link a tracked issue before opening a PR.");
+  else if (manifest.linkedIssuePolicy === "preferred") validationExpectations.push("Link a tracked issue if one exists.");
+  for (const e of manifest.testExpectations) {
+    if (isFocusManifestPublicSafe(e)) validationExpectations.push(e);
+  }
+
   const directPrLane: ContributionLanePreference =
-    safeWanted.length > 0 ? "preferred"
-    : safeBlocked.length > 0 && safeWanted.length === 0 ? "discouraged"
+    manifest.issueDiscoveryPolicy === "encouraged" ? "discouraged"
+    : safeWanted.length > 0 ? "preferred"
+    : safeBlocked.length > 0 ? "discouraged"
     : "neutral";
 
   const issueDiscoveryLane: ContributionLanePreference =
@@ -688,49 +638,80 @@ export function deriveContributionLanes(manifest: FocusManifest): ContributionLa
     : manifest.issueDiscoveryPolicy === "discouraged" ? "discouraged"
     : "neutral";
 
-  const guidanceText: string[] = [];
+  const issueEntryGuidance: string[] = [];
+  if (manifest.issueDiscoveryPolicy === "encouraged") {
+    issueEntryGuidance.push("Issue discovery reports are welcomed; search for gaps before opening a PR.");
+  } else if (manifest.issueDiscoveryPolicy === "discouraged") {
+    issueEntryGuidance.push("Prefer direct fixes over new issue reports; this repo discourages issue-discovery submissions.");
+  }
+  if (manifest.linkedIssuePolicy === "required") {
+    issueEntryGuidance.push("Issues must be linked to a PR before it is opened.");
+  } else if (manifest.linkedIssuePolicy === "preferred") {
+    issueEntryGuidance.push("Link an existing issue to your PR when one is available.");
+  }
 
+  const prEntryGuidance: string[] = [];
+  if (safeWanted.length > 0) {
+    prEntryGuidance.push(`Focus changes on maintainer-wanted areas: ${manifest.wantedPaths.slice(0, 5).join(", ")}.`);
+  }
+  if (safeBlocked.length > 0) {
+    prEntryGuidance.push(`Avoid maintainer-blocked areas: ${manifest.blockedPaths.slice(0, 5).join(", ")}.`);
+  }
+  if (manifest.preferredLabels.length > 0) {
+    const safeLabels = manifest.preferredLabels.filter(isFocusManifestPublicSafe);
+    if (safeLabels.length > 0) {
+      prEntryGuidance.push(`Apply a maintainer-preferred label to your PR: ${safeLabels.slice(0, 3).join(", ")}.`);
+    }
+  }
+  prEntryGuidance.push(...safePublicNotes);
+  const safeprEntryGuidance = [...new Set(prEntryGuidance)].filter(isFocusManifestPublicSafe);
+
+  const guidanceText: string[] = [];
   if (manifest.linkedIssuePolicy === "required") {
     guidanceText.push("Link a tracked issue before opening a pull request.");
   } else if (manifest.linkedIssuePolicy === "preferred") {
     guidanceText.push("Linking a tracked issue is preferred before opening a pull request.");
   }
-
   if (manifest.preferredLabels.length > 0) {
     const safeLabels = manifest.preferredLabels.filter(isFocusManifestPublicSafe);
     if (safeLabels.length > 0) {
       guidanceText.push(`Apply a maintainer-preferred label: ${safeLabels.slice(0, 3).join(", ")}.`);
     }
   }
-
   guidanceText.push(...safePublicNotes);
 
   const warnings: string[] = [];
   if (safeWanted.length === 0 && manifest.preferredLabels.length === 0) {
     warnings.push("Contribution scope is unclear; focus manifest lacks wanted paths and preferred labels.");
   }
-  if (safeTestExpectations.length === 0) {
+  if (manifest.testExpectations.filter(isFocusManifestPublicSafe).length === 0) {
     warnings.push("Validation expectations are not defined in the focus manifest.");
   }
 
-  const summaryParts: string[] = [];
-  if (directPrLane === "preferred") summaryParts.push("direct PRs in wanted areas preferred");
-  else if (directPrLane === "discouraged") summaryParts.push("direct PRs discouraged outside wanted areas");
-  if (issueDiscoveryLane === "preferred") summaryParts.push("issue discovery welcome");
-  else if (issueDiscoveryLane === "discouraged") summaryParts.push("issue discovery discouraged");
+  const summary = buildLanesSummary(manifest, directPrLane, issueDiscoveryLane);
 
   return {
+    present: true,
+    source: manifest.source,
     directPrLane,
     issueDiscoveryLane,
     preferredEntryPaths: safeWanted,
     discouragedEntryPaths: safeBlocked,
-    validationExpectations: safeTestExpectations,
+    validationExpectations,
+    issueEntryGuidance: issueEntryGuidance.filter(isFocusManifestPublicSafe),
+    prEntryGuidance: safeprEntryGuidance,
     guidanceText: guidanceText.filter(isFocusManifestPublicSafe),
     warnings,
-    summary: summaryParts.length > 0
-      ? `Focus manifest lanes: ${summaryParts.join("; ")}.`
-      : "Focus manifest applied; no specific lane preference is set.",
+    summary,
   };
+}
+
+function buildLanesSummary(manifest: FocusManifest, directPrLane: ContributionLanePreference, issueDiscoveryLane: ContributionLanePreference): string {
+  if (issueDiscoveryLane === "preferred" && directPrLane === "discouraged") return "Issue-discovery is the preferred contribution mode for this repo.";
+  if (issueDiscoveryLane === "discouraged" && manifest.wantedPaths.length > 0) return "Direct PRs focused on the wanted areas are the preferred contribution mode.";
+  if (directPrLane === "preferred") return "Direct PRs on the maintainer-wanted areas are preferred.";
+  if (issueDiscoveryLane === "discouraged") return "Direct PRs are preferred; issue-discovery submissions are discouraged.";
+  return "Contribution lanes are guided by the maintainer focus manifest.";
 }
 
 // ─── Focus Manifest Policy Schema ────────────────────────────────────────────
