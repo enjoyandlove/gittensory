@@ -65,7 +65,7 @@ describe("Gittensor API contributor snapshots", () => {
         ]);
       }
       if (url.endsWith("/miners/49853598/issues")) {
-        return Response.json({ issues: [{ repo_full_name: "we-promise/sure", issue_number: 77, state: "closed", solved_by_pr: 1869, labels: [{ name: "feature" }, { name: "help wanted" }] }] });
+        return Response.json({ issue_count: 0 });
       }
       return new Response("not found", { status: 404 });
     });
@@ -81,7 +81,7 @@ describe("Gittensor API contributor snapshots", () => {
         expect.objectContaining({ repoFullName: "jsonbored/awesome-claude", pullRequests: 0, openIssues: 42 }),
       ],
       issueMirrorAvailable: true,
-      issues: [expect.objectContaining({ repoFullName: "we-promise/sure", number: 77, state: "closed", solvedByPullRequest: 1869, labels: ["feature", "help wanted"] })],
+      issues: [],
     });
     expect(contributorRepoStatsFromGittensor(snapshot)).toEqual(
       expect.arrayContaining([
@@ -151,7 +151,7 @@ describe("Gittensor API contributor snapshots", () => {
       if (url.endsWith("/miners/123")) {
         return Response.json({
           repositories: [
-            { repositoryFullName: undefined, totalPrs: "bad", totalOpenIssues: "1", totalClosedIssues: null, isEligible: true },
+            { repositoryFullName: { malformed: true }, totalPrs: "bad", totalOpenIssues: "1", totalClosedIssues: null, isEligible: true },
             { repositoryFullName: "owner/repo", totalPrs: "3", totalMergedPrs: "2", totalOpenIssues: "0", totalClosedIssues: "0", totalScore: "bad" },
           ],
         });

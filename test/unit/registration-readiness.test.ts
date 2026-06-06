@@ -37,9 +37,15 @@ function settingsFor(repoFullName: string, overrides: Partial<RepositorySettings
   return {
     repoFullName,
     commentMode: "detected_contributors_only",
+    publicAudienceMode: "oss_maintainer",
     publicSignalLevel: "standard",
     checkRunMode: "enabled",
     checkRunDetailLevel: "standard",
+    gateCheckMode: "off",
+    linkedIssueGateMode: "advisory",
+    duplicatePrGateMode: "advisory",
+    qualityGateMode: "advisory",
+    qualityGateMinScore: null,
     autoLabelEnabled: true,
     gittensorLabel: "gittensor",
     createMissingLabel: true,
@@ -153,6 +159,21 @@ describe("buildRegistrationReadiness", () => {
     expect(report.warnings).not.toContain("Check runs are disabled, so Gittensory cannot surface a per-PR quality gate to maintainers.");
     expect(report.githubApp.quietByDefault).toBe(false);
     expect(report.githubApp.behavior).toContain("for all PRs");
+  });
+
+  it("describes a quiet public surface while keeping the opt-in gate check enabled", () => {
+    const repo = repoFor("octo/quiet-gate", configFor({ repo: "octo/quiet-gate" }));
+    const settings = settingsFor(repo.fullName, { publicSurface: "off", gateCheckMode: "enabled" });
+    const report = buildRegistrationReadiness({
+      repoFullName: repo.fullName,
+      repo,
+      settings,
+      installation: healthyInstall,
+      ...signalsFor(repo, [], [], [label("bug")]),
+    });
+
+    expect(report.githubApp.behavior).toContain("stays quiet");
+    expect(report.githubApp.behavior).toContain("opt-in gate check still enabled");
   });
 
   it("notes when the GitHub App is not installed", () => {
