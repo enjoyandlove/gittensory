@@ -61,7 +61,7 @@ import {
 } from "../github/backfill";
 import { contributorRepoStatsFromGittensor, fetchGittensorContributorSnapshot, fetchOfficialGittensorMiner, type GittensorContributorSnapshot, type OfficialGittensorMinerDetection } from "../gittensor/api";
 import { createOrUpdateCheckRun, createOrUpdateGateCheckRun, createOrUpdatePendingGateCheckRun, createOrUpdateSkippedGateCheckRun, getInstallationId } from "../github/app";
-import { createOrUpdateAgentCommandComment, createOrUpdatePrIntelligenceComment } from "../github/comments";
+import { createOrUpdateAgentCommandComment, createOrUpdatePrIntelligenceComment, PR_PANEL_COMMENT_MARKER } from "../github/comments";
 import {
   buildMaintainerQueueDigest,
   buildPublicAgentCommandComment,
@@ -122,6 +122,7 @@ import {
   buildQueueHealth,
   buildRoleContext,
   detectGittensorContributor,
+  PR_PANEL_RETRIGGER_MARKER,
 } from "../signals/engine";
 import { decidePublicSurface } from "../signals/settings-preview";
 import type { LocalBranchAnalysisInput } from "../signals/local-branch";
@@ -659,6 +660,19 @@ async function processGitHubWebhook(env: Env, deliveryId: string, eventName: str
       return;
     }
 
+    if (eventName === "issue_comment" && (await maybeProcessPrPanelRetrigger(env, deliveryId, payload))) {
+      await recordWebhookEvent(env, {
+        deliveryId,
+        eventName,
+        action: payload.action,
+        installationId: payload.installation?.id,
+        repositoryFullName: payload.repository?.full_name,
+        payloadHash: "processed",
+        status: "processed",
+      });
+      return;
+    }
+
     if (eventName === "issue_comment" && (await maybeProcessGittensoryMentionCommand(env, deliveryId, payload))) {
       await recordWebhookEvent(env, {
         deliveryId,
@@ -817,6 +831,23 @@ async function maybePublishPrPublicSurface(
 ): Promise<void> {
   const author = pr.authorLogin ?? null;
   const gateEnabled = settings.gateCheckMode === "enabled" && Boolean(advisory.headSha);
+  // Cheap, network-free skip checks (also avoids the miner lookup when it would be wasted).
+  const prelim = decidePublicSurface({
+    settings,
+    authorLogin: author,
+    authorType: webhook.authorType ?? null,
+    authorAssociation: pr.authorAssociation ?? null,
+    minerStatus: "not_checked",
+  });
+  if (prelim.skipped) {
+    await auditPrVisibilitySkip(env, repoFullName, pr.number, author, prelim.skipReason ?? "skipped", webhook.deliveryId);
+    return;
+  }
+  const needsMinerCheckForDetectedComment =
+    settings.commentMode === "detected_contributors_only" && (settings.publicSurface === "comment_and_label" || settings.publicSurface === "comment_only");
+  if (!gateEnabled && prelim.actions.length === 1 && prelim.actions[0] === "none" && !needsMinerCheckForDetectedComment) return;
+  if (!author) return;
+
   if (gateEnabled && (pr.state !== "open" || webhook.action === "closed")) {
     const gateCheckResult = await createOrUpdateSkippedGateCheckRun(env, installationId, repoFullName, advisory, "PR closed before full evaluation.");
     if (gateCheckResult?.kind === "permission_missing") {
@@ -832,6 +863,34 @@ async function maybePublishPrPublicSurface(
     ).catch(() => undefined);
     return;
   }
+  const prelimHasPublicOutput = needsMinerCheckForDetectedComment || prelim.actions.some((action) => action === "comment" || action === "label" || action === "check_run");
+  let official: Awaited<ReturnType<typeof getCachedOfficialMinerDetection>> | null = null;
+  let decision = prelim;
+  if (prelimHasPublicOutput) {
+    const requireOfficialMiner = settings.publicAudienceMode === "gittensor_only";
+    official = await getCachedOfficialMinerDetection(env, author, {
+      targetKey: `${repoFullName}#${pr.number}`,
+      deliveryId: webhook.deliveryId,
+    });
+    if (requireOfficialMiner && official.status === "unavailable") {
+      await auditPrVisibilitySkip(env, repoFullName, pr.number, author, "miner_detection_unavailable", webhook.deliveryId);
+      return;
+    }
+    if (requireOfficialMiner && official.status !== "confirmed") {
+      await auditPrVisibilitySkip(env, repoFullName, pr.number, author, "not_official_gittensor_miner", webhook.deliveryId);
+      return;
+    }
+    decision = decidePublicSurface({
+      settings,
+      authorLogin: author,
+      authorType: webhook.authorType ?? null,
+      authorAssociation: pr.authorAssociation ?? null,
+      minerStatus: official.status,
+    });
+
+    if (!gateEnabled && decision.actions.length === 1 && decision.actions[0] === "none") return;
+  }
+
   let pendingGateCheckRunId: number | undefined;
   if (gateEnabled) {
     const pendingGateResult = await createOrUpdatePendingGateCheckRun(env, installationId, repoFullName, advisory);
@@ -881,50 +940,13 @@ async function maybePublishPrPublicSurface(
     }
   }
 
-  // Cheap, network-free skip checks (also avoids the miner lookup when it would be wasted).
-  const prelim = decidePublicSurface({
-    settings,
-    authorLogin: author,
-    authorType: webhook.authorType ?? null,
-    authorAssociation: pr.authorAssociation ?? null,
-    minerStatus: "not_checked",
-  });
-  if (prelim.skipped) {
-    await auditPrVisibilitySkip(env, repoFullName, pr.number, author, prelim.skipReason ?? "skipped", webhook.deliveryId);
-    return;
-  }
-  if (prelim.actions.length === 1 && prelim.actions[0] === "none") return;
-  if (!author) return;
+  if (!prelimHasPublicOutput) return;
+  if (!official) return;
 
-  const requireOfficialMiner = settings.publicAudienceMode === "gittensor_only";
-  const official = await getCachedOfficialMinerDetection(env, author, {
-    targetKey: `${repoFullName}#${pr.number}`,
-    deliveryId: webhook.deliveryId,
-  });
-  if (requireOfficialMiner && official.status === "unavailable") {
-    await auditPrVisibilitySkip(env, repoFullName, pr.number, author, "miner_detection_unavailable", webhook.deliveryId);
-    return;
-  }
-  if (requireOfficialMiner && official.status !== "confirmed") {
-    await auditPrVisibilitySkip(env, repoFullName, pr.number, author, "not_official_gittensor_miner", webhook.deliveryId);
-    return;
-  }
-  const decision = decidePublicSurface({
-    settings,
-    authorLogin: author,
-    authorType: webhook.authorType ?? null,
-    authorAssociation: pr.authorAssociation ?? null,
-    minerStatus: official.status,
-  });
-
-  const publishCachedContributorActivity = official.status === "confirmed";
-  const [contributorPullRequests, contributorIssues, github, cachedRepoStats] = await Promise.all([
-    publishCachedContributorActivity ? listContributorPullRequests(env, author) : Promise.resolve([]),
-    publishCachedContributorActivity ? listContributorIssues(env, author) : Promise.resolve([]),
-    fetchPublicContributorProfile(author),
-    publishCachedContributorActivity ? listContributorRepoStats(env, author) : Promise.resolve([]),
-  ]);
-  const repoStats = official.status === "confirmed" ? authoritativeContributorRepoStats(official.snapshot, cachedRepoStats) : [];
+  const [github] = await Promise.all([fetchPublicContributorProfile(author)]);
+  const contributorPullRequests: Awaited<ReturnType<typeof listContributorPullRequests>> = [];
+  const contributorIssues: Awaited<ReturnType<typeof listContributorIssues>> = [];
+  const repoStats: Awaited<ReturnType<typeof listContributorRepoStats>> = official.status === "confirmed" ? contributorRepoStatsFromGittensor(official.snapshot) : [];
   const detection =
     official.status === "confirmed"
       ? officialGittensorContributorDetection(official.snapshot, pr, contributorPullRequests, contributorIssues, repoStats)
@@ -1069,6 +1091,103 @@ async function recordGithubProductUsage(
     clientName: "github_app",
     metadata: event.metadata,
   }).catch(() => undefined);
+}
+
+async function maybeProcessPrPanelRetrigger(env: Env, deliveryId: string, payload: GitHubWebhookPayload): Promise<boolean> {
+  const comment = payload.comment;
+  if (payload.action !== "edited" || !comment || !isCheckedPrPanelRetrigger(comment.body)) return false;
+  if (!isGittensoryPanelBotComment(env, comment.user)) return false;
+
+  const repoFullName = payload.repository?.full_name;
+  const issue = payload.issue;
+  const installationId = getInstallationId(payload);
+  const actor = payload.sender?.login ?? null;
+  const targetKey = repoFullName && issue ? `${repoFullName}#${issue.number}` : repoFullName;
+  if (payload.sender?.type === "Bot" || /\[bot\]$/i.test(actor ?? "")) {
+    await recordPrPanelRetriggerSkip(env, deliveryId, repoFullName, targetKey, actor, "bot_author");
+    return true;
+  }
+  if (!repoFullName || !issue?.pull_request || !installationId) {
+    await recordPrPanelRetriggerSkip(env, deliveryId, repoFullName, targetKey, actor, "missing_repo_pr_or_installation");
+    return true;
+  }
+  const pr = await getPullRequest(env, repoFullName, issue.number);
+  if (!pr) {
+    await recordPrPanelRetriggerSkip(env, deliveryId, repoFullName, targetKey, actor, "cached_pr_missing");
+    return true;
+  }
+
+  const [repo, settings, otherOpenPullRequests] = await Promise.all([
+    getRepository(env, repoFullName),
+    getRepositorySettings(env, repoFullName),
+    listOtherOpenPullRequests(env, repoFullName, pr.number),
+  ]);
+  const advisory = buildPullRequestAdvisory(repo, pr, {
+    otherOpenPullRequests,
+    requireLinkedIssue: settings.requireLinkedIssue || settings.linkedIssueGateMode !== "off",
+  });
+  await persistAdvisory(env, advisory);
+  await recordAuditEvent(env, {
+    eventType: "github_app.pr_panel_retriggered",
+    actor,
+    targetKey: `${repoFullName}#${pr.number}`,
+    outcome: "completed",
+    metadata: { deliveryId, repoFullName, commentId: comment.id },
+  });
+  await maybePublishPrPublicSurface(env, installationId, repoFullName, pr, repo, settings, advisory, {
+    deliveryId,
+    action: "manual_retrigger",
+  });
+  await recordGithubProductUsage(env, "pr_panel_retriggered", {
+    actor,
+    repoFullName,
+    targetKey: `${repoFullName}#${pr.number}`,
+    outcome: "completed",
+    metadata: { commentId: comment.id },
+  });
+  return true;
+}
+
+function isCheckedPrPanelRetrigger(body: string | null | undefined): boolean {
+  if (!body?.includes(PR_PANEL_COMMENT_MARKER) || !body.includes(PR_PANEL_RETRIGGER_MARKER)) return false;
+  return checkedMarkerRegex(PR_PANEL_RETRIGGER_MARKER).test(body);
+}
+
+function checkedMarkerRegex(marker: string): RegExp {
+  return new RegExp(`(?:^|\\n)\\s*[-*]\\s*\\[[xX]\\]\\s*${escapeRegExp(marker)}`);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isGittensoryPanelBotComment(env: Env, user: NonNullable<GitHubWebhookPayload["comment"]>["user"] | undefined): boolean {
+  return user?.type === "Bot" && user.login?.toLowerCase() === `${env.GITHUB_APP_SLUG}[bot]`.toLowerCase();
+}
+
+async function recordPrPanelRetriggerSkip(
+  env: Env,
+  deliveryId: string,
+  repoFullName: string | null | undefined,
+  targetKey: string | null | undefined,
+  actor: string | null,
+  reason: string,
+): Promise<void> {
+  await recordAuditEvent(env, {
+    eventType: "github_app.pr_panel_retrigger_skipped",
+    actor,
+    targetKey,
+    outcome: "completed",
+    detail: reason,
+    metadata: { deliveryId, ...(repoFullName ? { repoFullName } : {}) },
+  });
+  await recordGithubProductUsage(env, "pr_panel_retrigger_skipped", {
+    actor,
+    repoFullName,
+    targetKey,
+    outcome: "skipped",
+    metadata: { reason },
+  });
 }
 
 async function maybeProcessGittensoryMentionCommand(env: Env, deliveryId: string, payload: GitHubWebhookPayload): Promise<boolean> {
