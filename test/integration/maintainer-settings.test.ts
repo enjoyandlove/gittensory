@@ -6,9 +6,14 @@ import { createTestEnv } from "../helpers/d1";
 
 const VALID_SETTINGS = {
   commentMode: "detected_contributors_only",
+  publicAudienceMode: "oss_maintainer",
   publicSignalLevel: "standard",
   checkRunMode: "off",
   checkRunDetailLevel: "standard",
+  gateCheckMode: "off",
+  linkedIssueGateMode: "advisory",
+  duplicatePrGateMode: "advisory",
+  qualityGateMode: "advisory",
   autoLabelEnabled: true,
   gittensorLabel: "gittensor",
   createMissingLabel: true,
@@ -153,6 +158,52 @@ describe("maintainer settings update authorization", () => {
     expect(response.status).toBe(200);
     const raw = JSON.stringify(await response.json());
     expect(raw).not.toMatch(/wallet|hotkey|raw trust|reward estimate|payout|farming|private reviewability|scoreability|public score estimate/i);
+  });
+
+  it("returns 400 for malformed JSON request body instead of silently writing defaults", async () => {
+    const app = createApp();
+    const env = createTestEnv();
+
+    const response = await app.request(
+      "/v1/app/repos/owner/project/settings",
+      { method: "POST", headers: { ...apiHeaders(env), "content-type": "application/json" }, body: "{ not valid json" },
+      env,
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_request_body" });
+  });
+
+  it("persists all gate and policy settings without silently resetting to defaults", async () => {
+    const app = createApp();
+    const env = createTestEnv();
+
+    const response = await app.request(
+      "/v1/app/repos/owner/project/settings",
+      {
+        method: "POST",
+        headers: apiHeaders(env),
+        body: JSON.stringify({
+          ...VALID_SETTINGS,
+          publicAudienceMode: "gittensor_only",
+          gateCheckMode: "enabled",
+          linkedIssueGateMode: "block",
+          duplicatePrGateMode: "block",
+          qualityGateMode: "block",
+          qualityGateMinScore: 75,
+        }),
+      },
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.publicAudienceMode).toBe("gittensor_only");
+    expect(body.gateCheckMode).toBe("enabled");
+    expect(body.linkedIssueGateMode).toBe("block");
+    expect(body.duplicatePrGateMode).toBe("block");
+    expect(body.qualityGateMode).toBe("block");
+    expect(body.qualityGateMinScore).toBe(75);
   });
 
   it("allows an owner-installation session to update their own repo settings", async () => {

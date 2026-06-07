@@ -1547,15 +1547,22 @@ export function createApp() {
       const repoForbidden = await requireSessionRepoAccess(c, identity, fullName, repo);
       if (repoForbidden) return repoForbidden;
     }
-    const body = (await c.req.json().catch(() => null)) ?? {};
+    const body = await c.req.json().catch(() => null);
+    if (body === null) return c.json({ error: "invalid_request_body" }, 400);
     const parsed = repositorySettingsSchema.safeParse(body);
     if (!parsed.success) return c.json({ error: "invalid_repository_settings", issues: parsed.error.issues }, 400);
     const updated = await upsertRepositorySettings(c.env, {
       repoFullName: fullName,
       commentMode: parsed.data.commentMode,
+      publicAudienceMode: parsed.data.publicAudienceMode,
       publicSignalLevel: parsed.data.publicSignalLevel,
       checkRunMode: parsed.data.checkRunMode,
       checkRunDetailLevel: parsed.data.checkRunDetailLevel,
+      gateCheckMode: parsed.data.gateCheckMode,
+      linkedIssueGateMode: parsed.data.linkedIssueGateMode,
+      duplicatePrGateMode: parsed.data.duplicatePrGateMode,
+      qualityGateMode: parsed.data.qualityGateMode,
+      qualityGateMinScore: parsed.data.qualityGateMinScore,
       autoLabelEnabled: parsed.data.autoLabelEnabled,
       gittensorLabel: parsed.data.gittensorLabel,
       createMissingLabel: parsed.data.createMissingLabel,
@@ -1564,6 +1571,7 @@ export function createApp() {
       requireLinkedIssue: parsed.data.requireLinkedIssue,
       backfillEnabled: parsed.data.backfillEnabled,
       privateTrustEnabled: parsed.data.privateTrustEnabled,
+      commandAuthorization: normalizeCommandAuthorizationPolicy(parsed.data.commandAuthorization).policy,
     });
     await recordAuditEvent(c.env, {
       eventType: "settings.updated",
