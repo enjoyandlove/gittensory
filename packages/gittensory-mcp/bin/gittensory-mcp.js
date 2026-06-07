@@ -1872,6 +1872,8 @@ function agentProfileInstructions(role) {
     ].join("\n");
   }
   throw new Error(`Unknown agent profile: ${JSON.stringify(role)}. Use one of: ${agentProfileNames.join(", ")}.`);
+}
+
 function doctorStatus(checks) {
   if (checks.some((check) => check.status === "fail")) return "needs_attention";
   if (checks.some((check) => check.status === "warn")) return "warnings";
